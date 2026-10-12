@@ -27,8 +27,8 @@ PDF 업로드
 | 필드 | 환경변수 | 기본값 |
 |---|---|---|
 | `api_key` | `GEMINI_API_KEY` | `""` |
-| `answer_model` | `THEOREMLENS_ANSWER_MODEL` | `gemini-2.5-pro` |
-| `fast_model` | `THEOREMLENS_FAST_MODEL` | `gemini-2.5-flash` |
+| `answer_model` | `THEOREMLENS_ANSWER_MODEL` | `gemini-3.8-flash` |
+| `fast_model` | `THEOREMLENS_FAST_MODEL` | `gemini-3.8-flash` |
 | `embed_model` | `THEOREMLENS_EMBED_MODEL` | `gemini-embedding-001` |
 | `text_extractor` | `THEOREMLENS_TEXT_EXTRACTOR` | `auto` (`auto|marker|pymupdf|gemini`) |
 | `data_dir` | `THEOREMLENS_DATA_DIR` | `<repo>/data` |
@@ -201,9 +201,8 @@ HTTP 계층만 담당한다. `create_app(web_dir=None)`, 모듈 수준 `app`.
 ## 13. 알려진 한계와 향후 과제
 
 - 후속 질문 검색은 직전 사용자 질문 한 개만 쓰는 폴백이다. 단독 질문이 우연히 임계값을 넘으면 이력은 검색에 쓰이지 않는다.
-- 재시작 복구는 기동 시 한 번만 돌고 책을 순차로 재개한다. 같은 DB를 여러 프로세스(`--reload` 워커 등)가 쓰면 중복 재개될 수 있다.
-- 인제스트 도중 삭제하는 경쟁 상태는 처리하지 않았다.
+- 재시작 복구는 기동 시 한 번만 돌고 책을 순차로 재개한다. 삭제 경쟁을 막는 락은 프로세스 안에서만 유효하므로, 같은 DB를 여러 프로세스(`--reload` 워커 등)가 쓰면 같은 책이 중복 재개되거나 삭제와 겹칠 수 있다. 단일 프로세스 실행을 전제로 한다.
 - `/chat`은 `on_unsupported`를 넘기지 않아 항상 `drop`이다. 사용자에게 ⚠ 표시를 보여 주려면 `flag` 모드 노출이 필요하다.
 - 퍼지 임계값(90)과 `min_similarity`(0.55)는 합성 테스트 기준이며 실제 책으로 튜닝하지 않았다.
 - 스트리밍 응답이 없다.
-- `tests/eval/`(검색 적중률, 인용 정확도, 거절률 평가)는 아직 없다.
+- `tests/eval/run_eval.py`(검색 적중률, 인용 정확도, 거절률 평가)는 있으나 예시 질문 파일(`questions.example.json`)뿐이다. 책별 질문 파일을 만들어 기준선을 측정해야 한다.
