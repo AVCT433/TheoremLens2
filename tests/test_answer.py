@@ -266,6 +266,34 @@ def test_history_is_truncated_to_recent_turns_and_ignores_bad_roles(fake_embed, 
     assert "inject-me" not in text
 
 
+def test_followup_question_is_retrieved_with_previous_user_question(fake_embed, fake_llm):
+    _add_book()
+    _script(fake_llm, _answer_json([_claim()]))
+    assert answer.answer("그럼 증명은?", ["b1"]).not_found  # 이력이 없으면 단독 질문은 근거가 없다
+    assert not fake_llm.calls
+    hist = [{"role": "user", "content": Q}, {"role": "assistant", "content": "닫혀 있고 유계입니다."}]
+    r = answer.answer("그럼 증명은?", ["b1"], history=hist)
+    assert not r.not_found
+    assert [c.sid for c in r.citations] == ["S1"]
+    text = str(fake_llm.calls[0]["contents"])
+    assert "[S1]" in text and THM in text
+    assert text.rstrip().endswith("그럼 증명은?")  # 모델에게 보이는 질문은 원문 그대로
+
+
+def test_followup_with_unrelated_history_still_skips_llm(fake_embed, fake_llm):
+    _add_book()
+    hist = [{"role": "user", "content": "quantum chromodynamics gluon plasma"}]
+    r = answer.answer("그럼 증명은?", ["b1"], history=hist)
+    assert r.not_found and not fake_llm.calls
+
+
+def test_assistant_turns_are_not_used_to_build_retrieval_query(fake_embed, fake_llm):
+    _add_book()
+    hist = [{"role": "assistant", "content": Q}]  # 모델 출력은 검색 근거가 될 수 없다
+    r = answer.answer("그럼 증명은?", ["b1"], history=hist)
+    assert r.not_found and not fake_llm.calls
+
+
 def test_history_does_not_affect_not_found_short_circuit(fake_embed, fake_llm):
     _add_book()
     r = answer.answer("quantum chromodynamics gluon", ["b1"], history=[{"role": "user", "content": "compact"}])

@@ -100,6 +100,28 @@ def _mark_outside_book(markdown: str) -> str:
     return f"## {prompts.OUTSIDE_BOOK_HEADING}\n\n{markdown}"
 
 
+def _retrieve_with_context(question: str, book_ids: list[str], history: Sequence[dict] | None) -> retrieve.Retrieval:
+    """단독 질문을 먼저 검색하고, 근거가 없으면 직전 사용자 질문을 앞에 붙여 한 번 더 검색한다.
+
+    "그럼 증명은?" 같은 후속 질문은 단독으로는 검색되지 않는다. LLM으로 질의를 다시 쓰면 근거 확인 전에
+    모델을 부르게 되므로, 결정적으로 직전 사용자 질문만 쓴다(모델 출력인 assistant 턴은 쓰지 않는다).
+    """
+    r = retrieve.retrieve(question, book_ids)
+    if not r.not_found:
+        return r
+    prev = next(
+        (
+            str(h["content"]).strip()
+            for h in reversed(history or [])
+            if h.get("role") == "user" and str(h.get("content", "")).strip()
+        ),
+        "",
+    )
+    if not prev:
+        return r
+    return retrieve.retrieve(f"{prev}\n{question}", book_ids)
+
+
 def answer(
     question: str,
     book_ids: list[str],
@@ -108,7 +130,7 @@ def answer(
     on_unsupported: Literal["drop", "flag"] = "drop",
 ) -> AnswerResponse:
     """질문 하나에 대한 단일 진입점. history는 [{"role": "user"|"assistant", "content": str}]."""
-    r = retrieve.retrieve(question, book_ids)
+    r = _retrieve_with_context(question, book_ids, history)
     if r.not_found:
         return _not_found()  # 근거가 약하면 LLM을 부르지 않는다
 
