@@ -1,0 +1,11 @@
+# theoremlens/ingest/ (PDF ingestion)
+
+Turns an uploaded PDF into structured, citable math units. Stops at data; no DB or vector writes happen here except through the pipeline's caller.
+
+- `extract.py` (implemented): classifies each page as text-layer or scanned. Text pages use Marker if installed, else PyMuPDF. Scanned pages are rendered and transcribed by Gemini vision. Output is `PageText(page_no, markdown, method)`, 1-based page numbers.
+- `structure.py` (implemented): splits page Markdown into math units (Definition, Theorem, Lemma, Proof, Example, Exercise, and Korean equivalents). Keeps a theorem with its proof. Never splits `$$...$$` blocks. Produces `label` and `refs` normalized to English lowercase types (`정리 3.2` -> `theorem 3.2`, `보조정리` -> `lemma`; the mapping is `TYPE_ALIASES`, shared with `rag/retrieve.py`), `display_label` in the original wording, chapter/section, and page range.
+- `pipeline.py` (implemented): `ingest_book(book_id, pdf_path)` orchestrates extract → structure → `db.replace_chunks` → `vectors.index_chunks`, updating `books.status` (`extracting` → `indexing` → `ready`/`error`) and `progress` (extract 0-0.5, index 0.5-1). Extracts in batches of `EXTRACT_BATCH` pages and saves each batch, skipping pages already in the `pages` table, so re-runs and retries are cheap. Never raises: failures become `status='error'` plus `message`. Warns on pages with an odd number of `$$`.
+
+Rules:
+- Keep extraction output verbatim. Do not summarize or "fix" content here; the verbatim text is what citations are checked against later.
+- Pure parsing logic (`structure.py`) must stay free of network calls so it can be unit-tested with sample Markdown.
