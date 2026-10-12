@@ -53,6 +53,15 @@ Pipeline: **extract → structure → index → retrieve → answer → verify**
 
 - Unit tests never hit the network; Gemini is faked. Layers, isolation fixtures, and per-module checks are in `tests/CLAUDE.md`; quality evaluation is in `tests/eval/CLAUDE.md`.
 
+### Development workflow (tests first)
+
+- Develop test-first. For every new module or behavior change, write the tests first, run them and confirm they fail for the right reason, then implement until they pass. The tests, not the implementation, define correctness.
+- Verify after every step, not only at the end: run the module's tests plus the full `pytest`, `ruff check`, and `ruff format --check` each time a module is finished.
+- If a test fails, first decide whether the test or the implementation contradicts the spec (CLAUDE.md files). Fix the real defect; never bend the implementation or loosen a test just to make it pass.
+- Delegate each module to a sub agent that reads the root `CLAUDE.md` plus the `CLAUDE.md` of the folders it touches (`tests/`, `theoremlens/<pkg>/`, `web/`). Independent modules may run in parallel, but sub agents must not edit shared files (`tests/conftest.py`, `pyproject.toml`) or other modules; report the need instead.
+- After parallel work, check the contracts between modules yourself (for example, label normalization shared by `structure` and `retrieve`) and add a cross-module test for each contract.
+- Write files containing backslashes or quotes (LaTeX regexes, Korean strings with `\n`) with the Write/Edit tools, not shell heredocs, which corrupt them.
+
 ### Git
 
 - Commit messages follow Conventional Commits with an English prefix: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`. The body may be Korean.
