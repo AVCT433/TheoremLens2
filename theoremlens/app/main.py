@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -15,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from ..config import ROOT, get_settings
-from ..index import db, vectors
+from ..index import db
 from ..ingest import extract, pipeline
 from ..llm import LLMNotConfigured
 from ..rag import answer as rag_answer
@@ -103,8 +105,30 @@ def _save_upload(file: UploadFile, dest: Path, max_bytes: int) -> None:
             out.write(chunk)
 
 
+def _resume_interrupted() -> None:
+    for book_id, pdf_path in pipeline.recover_interrupted():
+        log.info("중단된 인제스트를 재개합니다: %s", book_id)
+        pipeline.ingest_book(book_id, pdf_path)
+
+
+def wait_for_recovery(app: FastAPI, timeout: float | None = None) -> None:
+    """재시작 복구 스레드가 끝나길 기다린다(테스트와 종료 처리용)."""
+    t = getattr(app.state, "recovery_thread", None)
+    if t is not None:
+        t.join(timeout)
+
+
 def create_app(web_dir: Path | None = None) -> FastAPI:
-    app = FastAPI(title="TheoremLens")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # 재시작으로 멈춘 책은 백그라운드 스레드에서 이어 한다(기동을 막지 않는다)
+        t = threading.Thread(target=_resume_interrupted, name="ingest-recovery", daemon=True)
+        app.state.recovery_thread = t
+        t.start()
+        yield
+        wait_for_recovery(app, timeout=5)
+
+    app = FastAPI(title="TheoremLens", lifespan=lifespan)
 
     @app.post("/books", response_model=BookOut)
     def upload_book(background: BackgroundTasks, file: Annotated[UploadFile, File()]) -> BookOut:
@@ -134,14 +158,7 @@ def create_app(web_dir: Path | None = None) -> FastAPI:
     @app.delete("/books/{book_id}")
     def delete_book(book_id: str) -> dict:
         _require_book(book_id)
-        vectors.delete_book(book_id)
-        db.delete_book(book_id)
-        try:
-            shutil.rmtree(get_settings().book_dir(book_id))
-        except FileNotFoundError:
-            pass
-        except OSError:
-            log.warning("책 파일 삭제 실패: %s", book_id, exc_info=True)
+        pipeline.purge_book(book_id)  # 진행 중인 인제스트와의 경쟁은 파이프라인이 처리한다
         return {"deleted": book_id}
 
     @app.post("/chat", response_model=ChatResponse)

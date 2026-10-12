@@ -13,3 +13,4 @@ Routes:
 Rules:
 - Ingestion runs in a background task. Never block a request on extraction.
 - Return citation source text from the DB, never from the model's output.
+- On startup (lifespan) a background thread resumes interrupted ingests via `pipeline.recover_interrupted()`. Deletion goes through `pipeline.purge_book`, never directly through `db`/`vectors`.

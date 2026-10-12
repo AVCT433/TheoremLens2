@@ -7,6 +7,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import bow_vector
 from theoremlens import llm
 from theoremlens.app import main
 from theoremlens.config import get_settings
@@ -24,6 +25,8 @@ QUESTION = "Theorem 1.1 every compact set is bounded"
 @pytest.fixture
 def client():
     with TestClient(main.app) as c:
+        # 기동 시 복구 스레드가 설정 싱글턴을 건드리므로 끝날 때까지 기다려 테스트의 설정 변경과 겹치지 않게 한다
+        main.wait_for_recovery(c.app)
         yield c
 
 
@@ -229,3 +232,75 @@ def test_static_serves_index_when_present(tmp_path):
 def test_app_starts_without_web_dir(tmp_path):
     with TestClient(main.create_app(web_dir=tmp_path / "missing")) as c:
         assert c.get("/books").status_code == 200
+
+
+# ---------- 재시작 복구 / 삭제 경쟁 ----------
+
+
+def test_startup_resumes_books_stuck_in_processing(make_pdf, fake_llm, fake_embed):
+    pdf = make_pdf(["text", "text"])
+    bid = "stuck1"
+    db.create_book(bid, "Stuck", "stuck.pdf")
+    db.update_book(bid, status="extracting", progress=0.2)
+    book_dir = get_settings().book_dir(bid)
+    book_dir.mkdir(parents=True)
+    (book_dir / "book.pdf").write_bytes(pdf.read_bytes())
+
+    with TestClient(main.create_app(web_dir=None)) as c:
+        main.wait_for_recovery(c.app)
+        st = c.get(f"/books/{bid}/status").json()
+
+    assert st["status"] == "ready" and st["progress"] == 1.0
+
+
+def test_startup_marks_stuck_book_without_pdf_as_error():
+    db.create_book("stuck2", "Stuck", "stuck.pdf")
+    db.update_book("stuck2", status="indexing")
+
+    with TestClient(main.create_app(web_dir=None)) as c:
+        main.wait_for_recovery(c.app)
+        st = c.get("/books/stuck2/status").json()
+
+    assert st["status"] == "error" and st["message"]
+
+
+def test_startup_does_not_touch_ready_or_error_books(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main.pipeline, "ingest_book", lambda *a: calls.append(a))
+    db.create_book("r", "R", "r.pdf")
+    db.update_book("r", status="ready", progress=1.0)
+    db.create_book("e", "E", "e.pdf")
+    db.update_book("e", status="error", message="boom")
+
+    with TestClient(main.create_app(web_dir=None)) as c:
+        main.wait_for_recovery(c.app)
+
+    assert calls == []
+    assert db.get_book("r")["status"] == "ready" and db.get_book("e")["message"] == "boom"
+
+
+def test_delete_during_ingest_leaves_nothing_behind(client, make_pdf, fake_llm, monkeypatch):
+    state = {}
+
+    def embed_then_delete(texts, task):
+        if "bid" in state and not state.get("deleted"):
+            state["deleted"] = True
+            assert client.delete(f"/books/{state['bid']}").status_code == 200
+        return [bow_vector(t) for t in texts]
+
+    monkeypatch.setattr(llm, "embed", embed_then_delete)
+    real = main.pipeline.ingest_book
+
+    def ingest(bid, path):
+        state["bid"] = bid
+        real(bid, path)
+
+    monkeypatch.setattr(main.pipeline, "ingest_book", ingest)
+    r = _upload(client, make_pdf(["text", "text"]))
+    bid = r.json()["id"]
+
+    assert state["deleted"]
+    assert db.get_book(bid) is None
+    assert db.chunks_by_label(["theorem 1.1"], [bid]) == []
+    assert vectors._collection().count() == 0
+    assert not get_settings().book_dir(bid).exists()

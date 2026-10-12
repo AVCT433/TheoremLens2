@@ -6,6 +6,9 @@ import logging
 
 import pytest
 
+from tests.conftest import bow_vector
+from theoremlens import llm
+from theoremlens.config import get_settings
 from theoremlens.index import db, vectors
 from theoremlens.ingest import extract as ex
 from theoremlens.ingest import pipeline
@@ -137,3 +140,111 @@ def test_odd_display_math_page_logs_warning(make_pdf, fake_llm, fake_embed, capl
 @pytest.mark.parametrize("md,expected", [("a $$ b $$ c", False), ("a $$ b", True), ("", False)])
 def test_has_odd_display_math(md, expected):
     assert pipeline.has_odd_display_math(md) is expected
+
+
+# ---------- 삭제와의 경쟁 조건 ----------
+
+
+def test_book_deleted_during_extraction_leaves_no_rows_or_vectors(make_pdf, fake_llm, fake_embed, monkeypatch):
+    pdf = make_pdf(["text", "text"])
+    bid = _book(pdf)
+    real = ex.extract
+
+    def extract_then_delete(path, on_page=None, skip=None):
+        pages = list(real(path, on_page=on_page, skip=skip))
+        pipeline.purge_book(bid)  # 추출이 끝나 저장하기 직전에 사용자가 책을 지운다
+        return pages
+
+    monkeypatch.setattr(ex, "extract", extract_then_delete)
+    pipeline.ingest_book(bid, pdf)
+
+    assert db.get_book(bid) is None
+    assert db.get_pages(bid) == []
+    assert db.chunks_by_label(["theorem 1.1"], [bid]) == []
+    assert _chroma_count() == 0
+
+
+def test_book_deleted_during_vector_indexing_leaves_no_vectors(make_pdf, fake_llm, monkeypatch):
+    pdf = make_pdf(["text", "text"])
+    bid = _book(pdf)
+
+    def embed_then_delete(texts, task):
+        pipeline.purge_book(bid)  # 임베딩 도중 삭제
+        return [bow_vector(t) for t in texts]
+
+    monkeypatch.setattr(llm, "embed", embed_then_delete)
+    pipeline.ingest_book(bid, pdf)
+
+    assert db.get_book(bid) is None
+    assert db.chunks_by_label(["theorem 1.1"], [bid]) == []
+    assert _chroma_count() == 0
+
+
+def test_purge_book_removes_rows_vectors_and_files(make_pdf, fake_llm, fake_embed):
+    pdf = make_pdf(["text"])
+    bid = _book(pdf)
+    pipeline.ingest_book(bid, pdf)
+    book_dir = get_settings().book_dir(bid)
+    book_dir.mkdir(parents=True)
+    (book_dir / "book.pdf").write_bytes(pdf.read_bytes())
+
+    pipeline.purge_book(bid)
+
+    assert db.get_book(bid) is None and db.get_pages(bid) == []
+    assert _chroma_count() == 0
+    assert not book_dir.exists()
+
+
+# ---------- 재시작 복구 ----------
+
+
+def _stuck_book(bid: str, status: str, with_pdf: bool, make_pdf=None) -> None:
+    db.create_book(bid, "Stuck", "stuck.pdf")
+    db.update_book(bid, status=status, progress=0.3)
+    if with_pdf:
+        d = get_settings().book_dir(bid)
+        d.mkdir(parents=True)
+        (d / "book.pdf").write_bytes(make_pdf(["text", "text"]).read_bytes())
+
+
+@pytest.mark.parametrize("status", ["queued", "extracting", "indexing"])
+def test_recover_interrupted_returns_stuck_books_with_pdf(status, make_pdf):
+    _stuck_book("s1", status, True, make_pdf)
+    db.create_book("done", "Done", "d.pdf")
+    db.update_book("done", status="ready", progress=1.0)
+    db.create_book("bad", "Bad", "b.pdf")
+    db.update_book("bad", status="error", message="x")
+
+    todo = pipeline.recover_interrupted()
+
+    assert [bid for bid, _ in todo] == ["s1"]
+    assert todo[0][1].name == "book.pdf" and todo[0][1].exists()
+    assert db.get_book("done")["status"] == "ready"
+    assert db.get_book("bad")["message"] == "x"
+
+
+def test_recover_interrupted_marks_book_without_pdf_as_error():
+    _stuck_book("s2", "extracting", False)
+
+    todo = pipeline.recover_interrupted()
+
+    assert todo == []
+    book = db.get_book("s2")
+    assert book["status"] == "error" and book["message"]
+
+
+def test_resumed_ingest_reuses_extracted_pages(make_pdf, fake_llm, fake_embed):
+    fake_llm.default_text = SCAN_MD
+    pdf = make_pdf(["text", "scan"])
+    bid = _book(pdf)
+    d = get_settings().book_dir(bid)
+    d.mkdir(parents=True)
+    (d / "book.pdf").write_bytes(pdf.read_bytes())
+    db.save_page(bid, 2, SCAN_MD, "gemini")  # 재시작 전에 이미 전사된 쪽
+    db.update_book(bid, status="extracting")
+
+    for b, p in pipeline.recover_interrupted():
+        pipeline.ingest_book(b, p)
+
+    assert db.get_book(bid)["status"] == "ready"
+    assert fake_llm.calls == []  # 이미 있는 스캔 쪽을 다시 전사하지 않는다

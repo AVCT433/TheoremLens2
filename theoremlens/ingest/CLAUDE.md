@@ -9,3 +9,4 @@ Turns an uploaded PDF into structured, citable math units. Stops at data; no DB 
 Rules:
 - Keep extraction output verbatim. Do not summarize or "fix" content here; the verbatim text is what citations are checked against later.
 - Pure parsing logic (`structure.py`) must stay free of network calls so it can be unit-tested with sample Markdown.
+- `pipeline.purge_book(id)` is the only way to delete a book (vectors, rows, files); the pipeline re-checks the book exists before every write and cleans up after itself if it was deleted mid-run. `recover_interrupted()` lists books stuck in queued/extracting/indexing after a restart (missing PDF -> error).

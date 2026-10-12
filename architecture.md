@@ -96,6 +96,10 @@ queued → extracting (진행률 0~0.5) → indexing (0.5~1.0) → ready
 
 재실행 시 캐시되는 것은 추출 결과(pages)뿐이고, 청크와 벡터는 매번 다시 만든다.
 
+**재시작 복구**: 앱 기동(lifespan) 때 백그라운드 스레드가 `recover_interrupted()`로 `queued`/`extracting`/`indexing`에 멈춘 책을 찾는다. `data/books/{id}/book.pdf`가 있으면 `ingest_book`을 다시 돌려 이어 하고(추출된 쪽은 건너뜀), 없으면 `status="error"`와 사유 메시지로 바꾼다. `ready`/`error` 책은 건드리지 않는다.
+
+**삭제와의 경쟁**: `pipeline.purge_book(id)`(벡터 → SQLite → 파일)가 유일한 삭제 경로이고 `DELETE /books/{id}`가 이를 부른다. 파이프라인은 쪽 저장, 청크 교체, 벡터 배치마다, 그리고 `ready` 기록 직전에 책이 아직 있는지 확인하고(`BookDeleted`), 모듈 락으로 이 쓰기들과 삭제가 서로 끼어들지 않게 한다. 삭제를 알아챈 파이프라인은 자신이 남긴 벡터·행·파일을 치우고 조용히 끝난다(error로 기록하지 않음).
+
 ## 7. 저장소 (`index/`)
 
 ### SQLite (`db.py`)
@@ -142,7 +146,8 @@ queued → extracting (진행률 0~0.5) → indexing (0.5~1.0) → ready
 - 모델: `fast=True`면 `fast_model`, 아니면 `answer_model`. temperature 0, `ANSWER_SCHEMA = {answer_markdown, claims:[{text, source_ids, quote}], not_found}`.
 - **시스템 프롬프트 규칙**: 주어진 발췌만 근거로 삼는다. 모든 주장은 `claims`에 넣고 `source_ids`는 주어진 `S#`만 쓴다. `quote`는 발췌 본문에서 그대로 복사한다. 본문에는 `[S#]`를 표시한다. 책 밖 설명은 `## 보충(책 외부)` 섹션에만 쓰고 claims에 넣지 않는다. 답할 수 없으면 `not_found=true`. 이전 대화는 근거가 아니다.
 - **컨텍스트 조립** (`build_contents`): 선택적 이전 대화 블록 + `## 발췌`(`[S1] 책: … | 쪽: 12-13 | 라벨: … | 위치: 장 > 절` 다음 본문) + `## 질문`.
-- **history**: user/assistant 역할만, 비어 있지 않은 항목 중 **최근 6개 메시지**. "맥락 참고용, 근거 아님"으로 표시한다. 검색 질의에는 반영하지 않는다.
+- **history**: user/assistant 역할만, 비어 있지 않은 항목 중 **최근 6개 메시지**. "맥락 참고용, 근거 아님"으로 표시한다.
+- **후속 질문 검색**: 단독 질문으로 먼저 `retrieve`하고, not_found이면 **직전 사용자 질문**을 앞에 붙인 질의로 한 번 더 `retrieve`한다(결정적, LLM 질의 재작성 없음; assistant 턴은 쓰지 않는다). 그래도 not_found면 LLM 호출 없이 반환한다. 프롬프트의 질문은 원문 그대로다.
 - 응답 JSON을 해석하지 못하면 `AnswerError`. 모델이 `not_found`를 주면 그대로 반영한다.
 - **응답 모델(pydantic)**: `AnswerResponse(answer_markdown, claims[ClaimOut], citations[CitationOut], not_found, outside_book, verification)`.
   - `ClaimOut(text, display_text, source_ids, quote, status, reason)`
@@ -172,7 +177,7 @@ HTTP 계층만 담당한다. `create_app(web_dir=None)`, 모듈 수준 `app`.
 | `POST /books` | multipart `file`. `.pdf` 확장자 아니면 400, 첫 5바이트가 `%PDF-`가 아니면 400, `max_upload_mb` 초과 413. 저장 경로는 서버가 정함. `BackgroundTasks`로 `ingest_book` 등록, `BookOut`(처음엔 `queued`) 반환 |
 | `GET /books` | `BookOut` 목록(`num_chunks` 포함) |
 | `GET /books/{id}/status` | `{id, status, progress, message, num_pages}`, 없으면 404 |
-| `DELETE /books/{id}` | 벡터 → SQLite → 디스크 순으로 삭제, `{"deleted": id}` |
+| `DELETE /books/{id}` | `pipeline.purge_book`(벡터 → SQLite → 디스크). 진행 중인 인제스트가 있어도 안전. `{"deleted": id}` |
 | `POST /chat` | `{book_ids(1~20), question(≤4000자, 공백만이면 422), conversation_id?(^[A-Za-z0-9_-]{1,64}$)}` → `AnswerResponse + conversation_id` |
 | `GET /books/{id}/page/{n}` | 150dpi PNG. 범위(1..num_pages) 밖/없는 책이면 404 |
 | `/` | `web/` 정적 서빙(마지막에 마운트, 디렉터리가 없어도 앱은 뜸) |
@@ -195,8 +200,8 @@ HTTP 계층만 담당한다. `create_app(web_dir=None)`, 모듈 수준 `app`.
 
 ## 13. 알려진 한계와 향후 과제
 
-- `answer()`가 history를 검색 질의에 쓰지 않아 "그럼 증명은?" 같은 후속 질문은 단독으로 검색된다.
-- 서버 재시작으로 `extracting`/`indexing`에 멈춘 책을 이어 하는 기능이 없다(`ingest_book` 재실행은 가능).
+- 후속 질문 검색은 직전 사용자 질문 한 개만 쓰는 폴백이다. 단독 질문이 우연히 임계값을 넘으면 이력은 검색에 쓰이지 않는다.
+- 재시작 복구는 기동 시 한 번만 돌고 책을 순차로 재개한다. 같은 DB를 여러 프로세스(`--reload` 워커 등)가 쓰면 중복 재개될 수 있다.
 - 인제스트 도중 삭제하는 경쟁 상태는 처리하지 않았다.
 - `/chat`은 `on_unsupported`를 넘기지 않아 항상 `drop`이다. 사용자에게 ⚠ 표시를 보여 주려면 `flag` 모드 노출이 필요하다.
 - 퍼지 임계값(90)과 `min_similarity`(0.55)는 합성 테스트 기준이며 실제 책으로 튜닝하지 않았다.

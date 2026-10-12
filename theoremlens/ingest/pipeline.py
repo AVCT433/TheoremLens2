@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import threading
 from pathlib import Path
 
+from ..config import get_settings
 from ..index import db, vectors
 from . import extract, structure
 
@@ -20,8 +23,65 @@ EXTRACT_BATCH = 20
 _EXTRACT_SHARE = 0.5
 
 
+# 서버 재시작으로 중단되었을 수 있는 상태(처리 중이던 책)
+_IN_FLIGHT = ("queued", "extracting", "indexing")
+
+# 삭제(purge_book)와 파이프라인의 쓰기·최종 확인이 서로 끼어들지 않게 하는 락.
+# 락은 짧은 DB/벡터 조작 동안만 잡고, 추출·임베딩 같은 긴 작업 동안에는 잡지 않는다.
+_lifecycle = threading.RLock()
+
+
 class IngestError(RuntimeError):
     """인제스트를 계속할 수 없는 도메인 오류(예: 추출된 내용 없음)."""
+
+
+class BookDeleted(RuntimeError):
+    """인제스트 도중 책이 삭제되어 작업을 중단해야 한다."""
+
+
+def _ensure_alive(book_id: str) -> None:
+    if db.get_book(book_id) is None:
+        raise BookDeleted(book_id)
+
+
+def purge_book(book_id: str) -> None:
+    """책의 벡터 → SQLite → 디스크 파일을 지운다. 진행 중인 인제스트가 있어도 안전하다.
+
+    진행 중인 파이프라인은 다음 확인 지점에서 책이 사라진 것을 보고 멈추며, 그 뒤 남은 벡터를 스스로 치운다.
+    """
+    with _lifecycle:
+        vectors.delete_book(book_id)
+        db.delete_book(book_id)
+    _remove_files(book_id)
+
+
+def _remove_files(book_id: str) -> None:
+    try:
+        shutil.rmtree(get_settings().book_dir(book_id))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Windows에서 추출 중인 PDF가 열려 있으면 실패할 수 있다. 책은 이미 DB에서 사라졌다.
+        log.warning("책 파일 삭제 실패: %s", book_id, exc_info=True)
+
+
+def recover_interrupted() -> list[tuple[str, Path]]:
+    """재시작으로 멈춘 책을 찾는다. 원본 PDF가 있으면 (id, 경로)로 돌려주고, 없으면 error로 바꾼다.
+
+    재개는 호출자가 `ingest_book`으로 한다. 이미 추출된 쪽은 `pages` 캐시로 건너뛴다.
+    """
+    todo: list[tuple[str, Path]] = []
+    for b in db.list_books():
+        if b["status"] not in _IN_FLIGHT:
+            continue
+        pdf = get_settings().book_dir(b["id"]) / "book.pdf"
+        if pdf.exists():
+            todo.append((b["id"], pdf))
+        else:
+            db.update_book(
+                b["id"], status="error", message="서버가 재시작되어 처리가 중단되었고 원본 PDF를 찾을 수 없습니다."
+            )
+    return todo
 
 
 def has_odd_display_math(markdown: str) -> bool:
@@ -34,15 +94,19 @@ def _extract_pages(book_id: str, pdf_path: Path, total: int) -> None:
     todo = [n for n in range(1, total + 1) if n not in done]
     db.update_book(book_id, status="extracting", progress=_EXTRACT_SHARE * len(done) / max(1, total))
     for i in range(0, len(todo), EXTRACT_BATCH):
+        _ensure_alive(book_id)
         batch = set(todo[i : i + EXTRACT_BATCH])
         skip = set(range(1, total + 1)) - batch
         for p in extract.extract(pdf_path, skip=skip):
-            db.save_page(book_id, p.page_no, p.markdown, p.method)
+            with _lifecycle:
+                _ensure_alive(book_id)
+                db.save_page(book_id, p.page_no, p.markdown, p.method)
             done.add(p.page_no)
         db.update_book(book_id, progress=_EXTRACT_SHARE * len(done) / max(1, total))
 
 
 def _run(book_id: str, pdf_path: Path) -> None:
+    _ensure_alive(book_id)
     total = extract.page_count(pdf_path)
     db.update_book(book_id, num_pages=total, status="extracting", message="")
     _extract_pages(book_id, pdf_path, total)
@@ -57,23 +121,43 @@ def _run(book_id: str, pdf_path: Path) -> None:
 
     db.update_book(book_id, status="indexing", progress=_EXTRACT_SHARE)
     rows = [d.as_row() for d in drafts]
-    ids = db.replace_chunks(book_id, rows)
-    vectors.index_chunks(
-        book_id,
-        ids,
-        rows,
-        on_progress=lambda f: db.update_book(book_id, progress=_EXTRACT_SHARE + (1 - _EXTRACT_SHARE) * f),
-    )
-    db.update_book(book_id, status="ready", progress=1.0, message="")
+    with _lifecycle:
+        _ensure_alive(book_id)
+        ids = db.replace_chunks(book_id, rows)
+
+    def _progress(f: float) -> None:
+        _ensure_alive(book_id)  # 삭제되었으면 남은 임베딩을 중단한다
+        db.update_book(book_id, progress=_EXTRACT_SHARE + (1 - _EXTRACT_SHARE) * f)
+
+    vectors.index_chunks(book_id, ids, rows, on_progress=_progress)
+    with _lifecycle:
+        _ensure_alive(book_id)  # 마지막 배치가 삭제 뒤에 추가됐을 수 있으므로 ready 전에 다시 확인
+        db.update_book(book_id, status="ready", progress=1.0, message="")
 
 
 def ingest_book(book_id: str, pdf_path: Path) -> None:
     """book_id의 PDF를 처리한다. 실패하면 status='error'와 사유를 기록한다."""
     try:
         _run(book_id, pdf_path)
+    except BookDeleted:
+        _discard_leftovers(book_id)
     except Exception as e:  # noqa: BLE001 - 백그라운드 작업의 최상위: 실패를 상태로 남기고 삼킨다
         log.exception("인제스트 실패: %s", book_id)
         try:
-            db.update_book(book_id, status="error", message=str(e) or type(e).__name__)
+            with _lifecycle:
+                if db.get_book(book_id) is None:  # 삭제와 겹친 실패(예: FK 위반)는 오류가 아니라 삭제로 본다
+                    _discard_leftovers(book_id)
+                else:
+                    db.update_book(book_id, status="error", message=str(e) or type(e).__name__)
         except Exception:
             log.exception("오류 상태 기록 실패: %s", book_id)
+
+
+def _discard_leftovers(book_id: str) -> None:
+    """삭제된 책의 인제스트가 삭제 뒤에 남긴 벡터와 파일을 치운다."""
+    log.info("인제스트 중 책이 삭제되어 중단: %s", book_id)
+    with _lifecycle:
+        if db.get_book(book_id) is None:
+            vectors.delete_book(book_id)
+            db.delete_book(book_id)  # 삭제 뒤에 쓰인 행이 있다면 함께 정리
+    _remove_files(book_id)
