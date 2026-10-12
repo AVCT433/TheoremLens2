@@ -1,0 +1,48 @@
+[
+  {
+    "question": "Theorem 1.1 은 무엇을 말하나요?",
+    "expected_labels": ["theorem 1.1"]
+  },
+  {
+    "question": "거리공간에서 콤팩트 집합이 닫힌집합임을 보이는 증명을 설명해 주세요.",
+    "expected_labels": ["theorem 1.1"],
+    "expected_pages": [3, 4]
+  },
+  {
+    "question": "거리공간의 콤팩트 부분집합이 유계이고 닫혀 있다는 정리의 증명 아이디어는 무엇인가요?",
+    "expected_labels": ["theorem 1.1"]
+  },
+  {
+    "question": "What is the definition of a Cauchy sequence in this book?",
+    "expected_labels": ["definition 2.1"]
+  },
+  {
+    "question": "Why is every convergent sequence in a metric space a Cauchy sequence?",
+    "expected_pages": [12]
+  },
+  {
+    "question": "정의 3.4 의 연속 함수 조건을 엡실론-델타로 설명해 주세요.",
+    "expected_labels": ["정의 3.4"]
+  },
+  {
+    "question": "Heine-Borel 정리는 R^n 에서 어떻게 서술되나요?",
+    "expected_labels": ["theorem 4.3"],
+    "expected_pages": [21]
+  },
+  {
+    "question": "What does the Banach fixed point theorem say about contraction mappings on complete metric spaces?",
+    "expect_refusal": true
+  },
+  {
+    "question": "리만 가설(Riemann hypothesis)의 최신 증명 시도를 이 책은 어떻게 요약하나요?",
+    "expect_refusal": true
+  },
+  {
+    "question": "Explain the Sylow theorems and how they classify groups of order 12.",
+    "expect_refusal": true
+  },
+  {
+    "question": "페르마의 마지막 정리를 와일즈가 증명한 방법을 단계별로 설명해 주세요.",
+    "expect_refusal": true
+  }
+]

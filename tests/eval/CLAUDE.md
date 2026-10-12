@@ -10,7 +10,8 @@ Each book gets a question file (about 20–30 questions), hand-written, one entr
 Metrics to report:
 - retrieval hit rate: expected chunk in the top `Settings.top_k`;
 - citation accuracy: each cited `quote` fuzzy-matches its source chunk;
-- refusal rate on out-of-book questions, and the false-refusal rate on in-book questions (a bot that refuses everything must not look good).
+- refusal rate on out-of-book questions, and the false-refusal rate on in-book questions (a bot that refuses everything must not look good). Only `not_found` counts as a refusal;
+- `outside_book` answers (an answer was given but no claim has a verified citation) are reported separately: the outside-book answer rate on out-of-book questions (hallucination risk, lower is better) and the unsupported-answer rate on in-book questions (retrieval or verification failure).
 
 Rules:
 - Keep ground-truth files hand-written and reviewed. Do not generate them with the model under test.
