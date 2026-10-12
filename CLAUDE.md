@@ -24,11 +24,17 @@ Configuration comes from `.env` (see `.env.example`): `GEMINI_API_KEY`, the mode
 
 Pipeline: **extract → structure → index → retrieve → answer → verify**.
 
-- **Extract** (`ingest/extract.py`): each page is classified by its text-layer length. Text pages go through Marker if it is installed, otherwise PyMuPDF. Scanned pages are rendered to PNG and transcribed verbatim to Markdown+LaTeX by Gemini vision. The output is one Markdown string per page, stored in the `pages` table so re-ingestion can skip pages already extracted.
-- **Structure** : split pages into *math units* (Definition, Theorem, Lemma, Proof, Example, Exercise, and their Korean forms 정의, 정리, 증명, …). A theorem is kept together with its proof. Display math (`$$…$$`) is never split. Each chunk carries a normalized `label` (e.g. `theorem 3.2`), a `display_label`, the chapter and section, a page range, and `refs` (labels it cites, e.g. "by Lemma 2.4").
-- **Index** (`index/`): SQLite (`db.py`) is the source of truth for books, pages, chunks, and messages. The FTS5 table `chunks_fts` is kept in sync by triggers. ChromaDB (`vectors.py`) holds only Gemini embeddings, keyed by the SQLite chunk id with `book_id` metadata. Deleting a book must clear both stores.
-- **Retrieve** : BM25 (`db.fts_search`; lower score is better) and vector search (`vectors.search`; cosine similarity) are fused with RRF. Explicit labels in the question are looked up directly with `db.chunks_by_label`, and the lemmas a retrieved chunk cites are added one hop deep. If the best similarity is below `Settings.min_similarity`, the app answers "not in the book" without calling the LLM.
-- **Answer / verify** : Gemini is called at temperature 0 with JSON-schema output (`llm.generate_json`) shaped as `{answer_markdown, claims:[{text, source_ids, quote}], not_found}`. Every claim must cite `[S#]` excerpts. General math explanation from outside the book belongs only in a separately labelled "보충(책 외부)" section. Verification then fuzzy-matches each `quote` against its source chunk (rapidfuzz, after normalizing whitespace and LaTeX) and runs a fast-model check of whether the cited text supports each claim. Unsupported claims are dropped or flagged.
+Invariants to keep in mind (details, schemas, thresholds, and API shapes are in [architecture.md](architecture.md)):
+
+- Extracted page text is verbatim; citations are checked against it, so never summarize or "fix" it.
+- A chunk keeps a theorem with its proof, and display math (`$$…$$`) is never split.
+- `chunks.label` is normalized English (`lemma 3.2`, even for Korean `보조정리 3.2`); `display_label` keeps the original wording. The keyword table is `structure.TYPE_ALIASES`, shared with `retrieve`.
+- SQLite is the source of truth; Chroma holds only embeddings keyed by the chunk id. Deleting a book must clear both.
+- If retrieval finds no evidence (best similarity below `Settings.min_similarity` and no label hit), answer "not in the book" without calling the LLM.
+- Every claim cites `[S#]` excerpts; outside-book explanation goes only in the "보충(책 외부)" section. Citation text shown to the user comes from the DB, never from model output.
+- Verification is rules first (fuzzy quote match), LLM support check second; the LLM cannot revive a claim the rules rejected.
+
+When a change alters the architecture (schema, thresholds, routes, status flow, response shapes), update `architecture.md` in the same commit.
 
 ## Conventions
 
