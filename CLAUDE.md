@@ -4,73 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-TheoremLens: a local web app that ingests math textbooks (PDF, both text-layer and scanned) into a multi-book library and answers questions **only from the book content**, with citations, to minimize hallucination. LLM provider is **Google Gemini** (`google-genai` SDK); do not switch providers.
+TheoremLens: a local web app that ingests math textbooks (PDF, text-layer or scanned) into a multi-book library and answers questions **only from the book content**, with citations, to minimize hallucination. LLM provider is **Google Gemini** (`google-genai` SDK); do not switch providers.
 
-Status: backend complete. Done: `config.py`, `llm.py`, `index/*`, `ingest/*` (extract, structure, pipeline), `rag/*`, `app/main.py`, `web/` frontend (index.html, app.js, lib.js, style.css), and unit tests. Not yet written: `tests/eval/`. The approved design is in `C:\Users\baoro\.claude\plans\bright-snacking-sky.md`.
+Status: backend and frontend complete with unit tests; `tests/eval/run_eval.py` written (only a sample question file; real per-book question files still needed). Approved design: `C:\Users\baoro\.claude\plans\bright-snacking-sky.md`.
 
 ## Commands
 
 ```bash
-uv venv .venv && uv pip install -e ".[dev]"     # base + pytest/httpx
-uv pip install -e ".[marker]"                    # optional: Marker for LaTeX-quality text-PDF extraction (pulls torch)
-.venv/Scripts/python -m pytest                   # all tests
-.venv/Scripts/python -m pytest tests/test_x.py::test_name   # single test
+uv venv .venv && uv pip install -e ".[dev]"
+.venv/Scripts/python -m pytest                              # all tests (add path::name for one)
 .venv/Scripts/uvicorn theoremlens.app.main:app --reload     # run the app
 ```
 
-Configuration comes from `.env` (see `.env.example`): `GEMINI_API_KEY`, the model names (`THEOREMLENS_ANSWER_MODEL`, `THEOREMLENS_FAST_MODEL`, `THEOREMLENS_EMBED_MODEL`), and `THEOREMLENS_TEXT_EXTRACTOR` (`auto|marker|pymupdf|gemini`), and `THEOREMLENS_MAX_UPLOAD_MB` (upload cap, default 300). Runtime data (SQLite DB, Chroma index, per-book files) lives in `data/`, which is gitignored.
-
-## Architecture
+## Invariants
 
 Pipeline: **extract → structure → index → retrieve → answer → verify**.
 
-Invariants to keep in mind (details, schemas, thresholds, and API shapes are in [architecture.md](architecture.md)):
-
 - Extracted page text is verbatim; citations are checked against it, so never summarize or "fix" it.
 - A chunk keeps a theorem with its proof, and display math (`$$…$$`) is never split.
-- `chunks.label` is normalized English (`lemma 3.2`, even for Korean `보조정리 3.2`); `display_label` keeps the original wording. The keyword table is `structure.TYPE_ALIASES`, shared with `retrieve`.
-- SQLite is the source of truth; Chroma holds only embeddings keyed by the chunk id. Deleting a book must clear both.
-- If retrieval finds no evidence (best similarity below `Settings.min_similarity` and no label hit), answer "not in the book" without calling the LLM.
-- Every claim cites `[S#]` excerpts; outside-book explanation goes only in the "보충(책 외부)" section. Citation text shown to the user comes from the DB, never from model output.
-- Verification is rules first (fuzzy quote match), LLM support check second; the LLM cannot revive a claim the rules rejected.
+- SQLite is the source of truth; Chroma holds only embeddings keyed by chunk id. Deleting a book clears both.
+- No retrieval evidence → answer "not in the book" without calling the LLM.
+- Every claim cites `[S#]`; citation text shown to the user comes from the DB, never from model output.
+- Verification is rules first, LLM second; the LLM cannot revive a claim the rules rejected.
+- Page numbers are 1-based PDF page indices. All Gemini calls go through `theoremlens/llm.py`. Dependency direction `app → rag → index → ingest → (llm, config)`. User-facing text and prompts are Korean.
 
-When a change alters the architecture (schema, thresholds, routes, status flow, response shapes), update `architecture.md` in the same commit.
+## Where to look (read only when relevant)
 
-## Conventions
+- [architecture.md](architecture.md): schemas, thresholds, status flow, API shapes. Update it in the same commit as any architecture change.
+- [conventions.md](conventions.md): config/env, code style (ruff), naming, logging, errors, test rules. Read before writing code.
+- [workflow.md](workflow.md): test-first workflow, sub-agent delegation, Git/commit rules. Read before starting a feature or committing.
+- Folder specs: `tests/CLAUDE.md`, `tests/eval/CLAUDE.md`, `theoremlens/CLAUDE.md`, `theoremlens/<pkg>/CLAUDE.md`, `web/CLAUDE.md`.
 
-- Page numbers are **1-based PDF page indices** everywhere. They are not the printed page numbers.
-- All Gemini calls go through `theoremlens/llm.py`, which handles retries, the API-key check (`LLMNotConfigured`), and embedding batching. Do not instantiate `genai.Client` elsewhere.
-- `index/db.py` uses one shared connection guarded by an `RLock`. Use `tx()` for writes.
-- User-facing text and LLM prompts are in Korean.
-
-### Code style (enforced by ruff: `ruff check` and `ruff format`)
-
-- Line length 120, 4-space indent, double quotes.
-- Every module starts with a Korean docstring, then `from __future__ import annotations`. Imports go stdlib → third-party → relative (`from .. import llm`).
-- Respect the dependency direction `app → rag → index → ingest → (llm, config)`; never import upward.
-- Type-hint all public functions, using builtin generics (`list[int]`, `X | None`). API boundaries (request/response bodies, LLM JSON) are pydantic models; internal value objects are `@dataclass`.
-- Private helpers get a `_` prefix. Module logger is `log = logging.getLogger(__name__)`; use `logging`, never `print`.
-- Domain errors subclass `RuntimeError` (e.g. `LLMNotConfigured`). No bare `except Exception: pass`.
-- Read settings only via `get_settings()`, never `os.getenv` outside `config.py`.
-- Keep pure logic (`structure.py`, verification) free of network and DB access so it is unit-testable.
-- Comments explain *why*, not *what*, and are written in Korean. Identifiers are English.
-
-### Tests
-
-- Unit tests never hit the network; Gemini is faked. Layers, isolation fixtures, and per-module checks are in `tests/CLAUDE.md`; quality evaluation is in `tests/eval/CLAUDE.md`.
-
-### Development workflow (tests first)
-
-- Develop test-first. For every new module or behavior change, write the tests first, run them and confirm they fail for the right reason, then implement until they pass. The tests, not the implementation, define correctness.
-- Verify after every step, not only at the end: run the module's tests plus the full `pytest`, `ruff check`, and `ruff format --check` each time a module is finished.
-- If a test fails, first decide whether the test or the implementation contradicts the spec (CLAUDE.md files). Fix the real defect; never bend the implementation or loosen a test just to make it pass.
-- Delegate each module to a sub agent that reads the root `CLAUDE.md` plus the `CLAUDE.md` of the folders it touches (`tests/`, `theoremlens/<pkg>/`, `web/`). Independent modules may run in parallel, but sub agents must not edit shared files (`tests/conftest.py`, `pyproject.toml`) or other modules; report the need instead.
-- After parallel work, check the contracts between modules yourself (for example, label normalization shared by `structure` and `retrieve`) and add a cross-module test for each contract.
-- Write files containing backslashes or quotes (LaTeX regexes, Korean strings with `\n`) with the Write/Edit tools, not shell heredocs, which corrupt them.
-
-### Git
-
-- Commit messages follow Conventional Commits with an English prefix: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`. The body may be Korean.
-- One logical change per commit. Work on `feat/<name>` branches and merge into `main`.
-- Before committing, `ruff check`, `ruff format --check`, and `pytest` must pass.
-- Do not push unless asked.
+Before committing: `ruff check`, `ruff format --check`, and `pytest` must pass; do not push unless asked.
