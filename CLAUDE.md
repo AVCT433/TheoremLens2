@@ -28,8 +28,16 @@ Pipeline: **extract → structure → index → retrieve → answer → verify**
 - Verification is rules first, LLM second; the LLM cannot revive a claim the rules rejected.
 - Page numbers are 1-based PDF page indices. All Gemini calls go through `theoremlens/llm.py`. Dependency direction `app → rag → index → ingest → (llm, config)`. User-facing text and prompts are Korean.
 
+## TODO 관리
+
+- 남은 작업은 [TODO.md](TODO.md)에 저장하고 세션이 바뀌어도 이어간다.
+- 작업을 시작하기 전에 `TODO.md`를 읽고, 새로 생긴 일은 바로 추가한다.
+- 항목을 끝내면 같은 커밋에서 체크하고 Done으로 옮긴다.
+- 코드에 TODO 주석을 남기지 않고 `TODO.md`에만 적는다.
+
 ## Where to look (read only when relevant)
 
+- [TODO.md](TODO.md): 남은 작업 목록.
 - [architecture.md](architecture.md): schemas, thresholds, status flow, API shapes. Update it in the same commit as any architecture change.
 - [conventions.md](conventions.md): config/env, code style (ruff), naming, logging, errors, test rules. Read before writing code.
 - [workflow.md](workflow.md): test-first workflow, sub-agent delegation, Git/commit rules. Read before starting a feature or committing.
