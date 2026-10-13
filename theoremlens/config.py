@@ -18,7 +18,15 @@ class Settings:
     api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     answer_model: str = field(default_factory=lambda: os.getenv("THEOREMLENS_ANSWER_MODEL", "gemini-3.8-flash"))
     fast_model: str = field(default_factory=lambda: os.getenv("THEOREMLENS_FAST_MODEL", "gemini-3.8-flash"))
-    embed_model: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_MODEL", "gemini-embedding-001"))
+    # 임베딩은 로컬 모델(sentence-transformers)로 계산한다. Gemini는 생성에만 쓴다.
+    embed_model: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_MODEL", "BAAI/bge-m3"))
+    embed_device: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_DEVICE", "auto"))
+    embed_batch: int = field(default_factory=lambda: int(os.getenv("THEOREMLENS_EMBED_BATCH", "8")))
+    # bge-m3 기본 최대 길이는 8192 토큰이라 긴 청크가 섞인 배치는 어텐션이 GPU 메모리를 터뜨린다
+    embed_max_seq_length: int = field(default_factory=lambda: int(os.getenv("THEOREMLENS_EMBED_MAX_SEQ", "1024")))
+    # e5·nomic처럼 질의/문서 접두어가 필요한 모델용(bge-m3는 필요 없다)
+    embed_query_prefix: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_QUERY_PREFIX", ""))
+    embed_doc_prefix: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_DOC_PREFIX", ""))
     text_extractor: str = field(default_factory=lambda: os.getenv("THEOREMLENS_TEXT_EXTRACTOR", "auto"))
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("THEOREMLENS_DATA_DIR", ROOT / "data")))
 

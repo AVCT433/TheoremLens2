@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.conftest import add_legacy_collection, collection_names
+from theoremlens.config import get_settings
 from theoremlens.index import vectors
 
 
@@ -27,7 +29,7 @@ def test_search_orders_by_similarity(fake_embed):
 def test_documents_and_queries_use_distinct_embedding_tasks(fake_embed):
     vectors.index_chunks("b1", [1], _chunks("x"))
     vectors.search("x", ["b1"], 1)
-    assert [t for _, t in fake_embed.calls] == ["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
+    assert [t for _, t in fake_embed.calls] == ["document", "query"]
 
 
 def test_search_single_and_multi_book_filter(fake_embed):
@@ -65,3 +67,44 @@ def test_delete_book_leaves_other_books_intact(fake_embed):
     vectors.delete_book("b1")
     assert vectors.search("shared words", ["b1"], 5) == []
     assert [i for i, _ in vectors.search("shared words", ["b2"], 5)] == [2]
+
+
+def test_collection_name_is_per_embedding_model(monkeypatch):
+    monkeypatch.setenv("THEOREMLENS_EMBED_MODEL", "BAAI/bge-m3")
+    get_settings.cache_clear()
+    assert vectors.collection_name() == "chunks__baai-bge-m3"
+    monkeypatch.setenv("THEOREMLENS_EMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")
+    get_settings.cache_clear()
+    assert vectors.collection_name() == "chunks__nomic-ai-nomic-embed-text-v1.5"
+
+
+def test_vectors_of_different_models_do_not_mix(fake_embed, monkeypatch):
+    vectors.index_chunks("b1", [1], _chunks("metric space"))
+    assert vectors.has_book("b1")
+    monkeypatch.setenv("THEOREMLENS_EMBED_MODEL", "other/model")
+    get_settings.cache_clear()
+    vectors._collection.cache_clear()
+    assert not vectors.has_book("b1")
+    assert vectors.search("metric space", ["b1"], 5) == []
+
+
+def test_has_book_reflects_indexing_and_deletion(fake_embed):
+    assert not vectors.has_book("b1")
+    vectors.index_chunks("b1", [1], _chunks("x"))
+    assert vectors.has_book("b1") and not vectors.has_book("b2")
+    vectors.delete_book("b1")
+    assert not vectors.has_book("b1")
+
+
+def test_drop_legacy_removes_old_gemini_collection_only(fake_embed):
+    vectors.index_chunks("b1", [1], _chunks("keep me"))
+    add_legacy_collection()
+    assert "chunks" in collection_names()
+    assert vectors.drop_legacy() is True
+    assert "chunks" not in collection_names()
+    assert [i for i, _ in vectors.search("keep me", ["b1"], 5)] == [1]
+
+
+def test_drop_legacy_without_legacy_collection_is_noop(fake_embed):
+    vectors.index_chunks("b1", [1], _chunks("keep me"))
+    assert vectors.drop_legacy() is False

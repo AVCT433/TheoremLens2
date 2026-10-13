@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import chromadb
 import pytest
 from chromadb.api.shared_system_client import SharedSystemClient
 
-from theoremlens import llm
+from theoremlens import embedder, llm
 from theoremlens.config import get_settings
 from theoremlens.index import db, vectors
 
@@ -30,6 +31,7 @@ def _release() -> None:
     vectors._collection.cache_clear()
     SharedSystemClient.clear_system_cache()
     getattr(llm.client, "cache_clear", lambda: None)()  # 테스트가 client를 교체했을 수 있다
+    embedder._model = None
     get_settings.cache_clear()
     gc.collect()
 
@@ -40,6 +42,12 @@ def _isolate(tmp_path, monkeypatch, request) -> Iterator[None]:
     if "integration" not in request.keywords:
         monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.delenv("THEOREMLENS_TEXT_EXTRACTOR", raising=False)
+    if "integration" not in request.keywords:
+        # 실수로 실제 로컬 모델을 내려받거나 로드하지 않도록 막는다(Gemini 키를 비우는 것과 같은 이유)
+        def _blocked():
+            raise embedder.EmbedderNotAvailable("테스트에서는 실제 임베딩 모델을 로드할 수 없습니다.")
+
+        monkeypatch.setattr(embedder, "_load", _blocked)
     get_settings.cache_clear()
     db.close()
     vectors._collection.cache_clear()
@@ -62,6 +70,16 @@ def bow_vector(text: str) -> list[float]:
     return [x / norm for x in v]
 
 
+def add_legacy_collection() -> None:
+    """Gemini 시절의 `chunks` 컬렉션을 흉내 낸다(다른 차원의 벡터 하나)."""
+    client = chromadb.PersistentClient(path=str(get_settings().chroma_dir))
+    client.get_or_create_collection("chunks").add(ids=["9"], embeddings=[[0.1, 0.2]])
+
+
+def collection_names() -> list[str]:
+    return [c.name for c in chromadb.PersistentClient(path=str(get_settings().chroma_dir)).list_collections()]
+
+
 @dataclass
 class FakeEmbed:
     calls: list[tuple[list[str], str]] = field(default_factory=list)
@@ -75,7 +93,7 @@ def fake_embed(monkeypatch) -> FakeEmbed:
         fe.calls.append((list(texts), task))
         return [bow_vector(t) for t in texts]
 
-    monkeypatch.setattr(llm, "embed", _embed)
+    monkeypatch.setattr(embedder, "embed", _embed)
     return fe
 
 

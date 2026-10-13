@@ -300,7 +300,9 @@ def test_result_path_contains_models_and_date_under_data_dir(tmp_path):
     p = ev.result_path(s.data_dir, s, now)
     assert p.parent == s.data_dir / "eval"
     assert "2026-10-13" in p.name
-    assert s.answer_model in p.name and s.fast_model in p.name and s.embed_model in p.name
+    assert s.answer_model in p.name and s.fast_model in p.name
+    assert "BAAI-bge-m3" in p.name  # HuggingFace 모델명의 '/'는 파일명에서 '-'로 바뀐다
+    assert "/" not in p.name
     assert p.suffix == ".json"
 
 

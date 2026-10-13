@@ -8,7 +8,7 @@
 PDF 업로드
   └─ [ingest/extract]    쪽별 분류 → Marker/PyMuPDF 또는 Gemini 비전 → 쪽별 Markdown (pages 테이블)
   └─ [ingest/structure]  수학 단위 분할 → ChunkDraft (label, refs, 장/절, 쪽 범위)
-  └─ [index]             SQLite chunks(+FTS5)  /  Chroma 벡터(Gemini 임베딩)
+  └─ [index]             SQLite chunks(+FTS5)  /  Chroma 벡터(로컬 임베딩)
 질문
   └─ [rag/retrieve]      BM25 + 벡터 → RRF, 라벨 직접 조회, 1-hop 인용 확장, 근거 부족 판정
   └─ [rag/answer]        Gemini(JSON 스키마, temperature 0) → 주장(claims)과 [S#] 인용
@@ -16,7 +16,7 @@ PDF 업로드
   └─ [app → web]         답변, 인용 원문(DB), 원본 쪽 이미지
 ```
 
-- **의존 방향**: `app → rag → index → ingest → (llm, config)`. 아래 계층은 위 계층을 import하지 않는다. 예외적으로 `rag/retrieve`가 `ingest.structure.TYPE_ALIASES`를 import하는 것은 이 방향에 맞다.
+- **의존 방향**: `app → rag → index → ingest → (llm, embedder, config)`. 아래 계층은 위 계층을 import하지 않는다. 예외적으로 `rag/retrieve`가 `ingest.structure.TYPE_ALIASES`를 import하는 것은 이 방향에 맞다.
 - **저장소 역할**: SQLite가 원본이고(books, pages, chunks, messages), Chroma는 임베딩만 가진다. 청크의 `id`가 두 저장소의 조인 키다.
 - **쪽 번호**는 어디서나 **1부터 시작하는 PDF 쪽 인덱스**이며 책에 인쇄된 쪽 번호가 아니다.
 
@@ -29,7 +29,11 @@ PDF 업로드
 | `api_key` | `GEMINI_API_KEY` | `""` |
 | `answer_model` | `THEOREMLENS_ANSWER_MODEL` | `gemini-3.8-flash` |
 | `fast_model` | `THEOREMLENS_FAST_MODEL` | `gemini-3.8-flash` |
-| `embed_model` | `THEOREMLENS_EMBED_MODEL` | `gemini-embedding-001` |
+| `embed_model` | `THEOREMLENS_EMBED_MODEL` | `BAAI/bge-m3` (로컬 sentence-transformers 모델) |
+| `embed_device` | `THEOREMLENS_EMBED_DEVICE` | `auto` (`auto|cpu|cuda`) |
+| `embed_batch` | `THEOREMLENS_EMBED_BATCH` | `8` |
+| `embed_max_seq_length` | `THEOREMLENS_EMBED_MAX_SEQ` | `1024` |
+| `embed_query_prefix`, `embed_doc_prefix` | `THEOREMLENS_EMBED_QUERY_PREFIX`, `THEOREMLENS_EMBED_DOC_PREFIX` | `""` (e5·nomic 같은 접두어 모델용) |
 | `text_extractor` | `THEOREMLENS_TEXT_EXTRACTOR` | `auto` (`auto|marker|pymupdf|gemini`) |
 | `data_dir` | `THEOREMLENS_DATA_DIR` | `<repo>/data` |
 | `max_upload_mb` | `THEOREMLENS_MAX_UPLOAD_MB` | `300` |
@@ -44,14 +48,14 @@ data/                      (gitignored)
   books/<book_id>/book.pdf   # 서버가 정한 경로. 클라이언트 파일명은 쓰지 않는다
 ```
 
-## 3. LLM 계층 (`llm.py`)
+## 3. LLM 계층 (`llm.py`, `embedder.py`)
 
-Gemini 호출은 전부 이 모듈을 거치며, `genai.Client`는 여기서만 만든다.
+Gemini 호출은 전부 `llm.py`를 거치며, `genai.Client`는 여기서만 만든다. 임베딩은 Gemini가 아니라 로컬 모델이며 `embedder.py`가 맡는다.
 
 - `generate_json(model, system, contents, schema) -> str`: temperature 0, `response_mime_type="application/json"`, 스키마 제약 출력.
-- `generate_text(model, system, contents) -> str`, `image_part(data, mime)`, `embed(texts, task)` (`task`는 `RETRIEVAL_DOCUMENT` / `RETRIEVAL_QUERY`).
+- `generate_text(model, system, contents) -> str`, `image_part(data, mime)`.
 - **재시도**: 총 4회, 실패 시 1·2·4초 대기. `LLMNotConfigured`(키 없음)는 재시도하지 않고 즉시 올린다.
-- **임베딩**은 64개씩 배치로 보내고 순서를 유지한다.
+- **`embedder.embed(texts, task) -> list[list[float]]`** (`task`는 `"document"` / `"query"`): sentence-transformers 모델을 프로세스당 한 번 로드(락)하고, L2 정규화한 벡터를 입력 순서대로 돌려준다. 접두어 설정을 task별로 붙이고, 빈 입력이면 모델을 로드하지 않는다. 디바이스 `auto`는 CUDA가 있으면 cuda, 없으면 cpu. API 키·네트워크가 필요 없다(모델 최초 다운로드 제외).
 - 테스트에서는 이 모듈의 속성만 patch한다(`tests/CLAUDE.md`).
 
 ## 4. 추출 (`ingest/extract.py`)
@@ -119,10 +123,12 @@ queued → extracting (진행률 0~0.5) → indexing (0.5~1.0) → ready
 - `delete_book`은 chunks, pages, books를 지운다(FTS는 트리거가 정리). 벡터는 호출자가 `vectors.delete_book`을 함께 불러야 한다.
 
 ### Chroma (`vectors.py`)
-컬렉션 `chunks`(cosine, `PersistentClient`)에 청크 id(문자열)로 임베딩과 `{book_id}` 메타데이터만 저장한다.
+컬렉션 `chunks__<임베딩 모델 slug>`(cosine, `PersistentClient`)에 청크 id(문자열)로 임베딩과 `{book_id}` 메타데이터만 저장한다. 모델마다 컬렉션이 달라 차원·의미가 다른 벡터가 섞이지 않는다.
 
 - `embed_text_for(chunk)`: `"장 / 절 / display_label"` 헤더 + 줄바꿈 + 본문. 이 형식을 바꾸면 전체 재색인이 필요하다.
-- `index_chunks`는 64개씩 `RETRIEVAL_DOCUMENT`로 임베딩한다. `search`는 `RETRIEVAL_QUERY`로 임베딩하고 `1 - distance`(높을수록 유사)를 돌려준다. 책이 하나면 `book_id` 같음, 여럿이면 `$in` 필터.
+- `index_chunks`는 64개씩 `document`로 임베딩한다. `search`는 `query`로 임베딩하고 `1 - distance`(높을수록 유사)를 돌려준다. 책이 하나면 `book_id` 같음, 여럿이면 `$in` 필터.
+- `has_book(book_id)`: 현재 모델의 컬렉션에 책의 벡터가 있는가. `drop_legacy()`: Gemini 시절의 `chunks` 컬렉션을 지운다.
+- **임베딩 모델 교체**: `THEOREMLENS_EMBED_MODEL`을 바꾸면 새 컬렉션이 비어 있다. 서버 시작 때 복구 스레드가 `recover_interrupted` 재개 뒤 `pipeline.reindex_missing()`을 불러, `ready`인데 벡터가 없는 책을 SQLite 청크로 다시 임베딩한다(재추출·Gemini 호출 없음). 재임베딩 동안 책은 `indexing`이고, 실패하면 `error`와 사유가 남는다. 벡터가 갖춰지면 옛 `chunks` 컬렉션을 지운다. 새 모델은 유사도 분포가 다르므로 `min_similarity`를 평가 러너로 다시 튜닝한다.
 
 ## 8. 검색 (`rag/retrieve.py`)
 

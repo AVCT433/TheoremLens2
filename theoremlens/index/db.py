@@ -246,6 +246,13 @@ def get_chunks(ids: list[int]) -> list[Chunk]:
     return [by_id[i] for i in ids if i in by_id]
 
 
+def book_chunks(book_id: str) -> list[Chunk]:
+    """책의 모든 청크를 ord 순서로. 임베딩을 다시 만들 때 쓴다."""
+    with _lock:
+        rows = conn().execute("SELECT * FROM chunks WHERE book_id=? ORDER BY ord", (book_id,)).fetchall()
+    return [Chunk.from_row(r) for r in rows]
+
+
 def chunks_by_label(labels: list[str], book_ids: list[str]) -> list[Chunk]:
     if not labels or not book_ids:
         return []

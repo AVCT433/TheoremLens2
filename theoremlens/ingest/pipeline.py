@@ -84,6 +84,54 @@ def recover_interrupted() -> list[tuple[str, Path]]:
     return todo
 
 
+def reindex_missing() -> list[str]:
+    """ready인데 현재 임베딩 모델의 벡터가 없는 책을 SQLite 청크로 다시 임베딩한다. 재임베딩한 책 id를 돌려준다.
+
+    임베딩 모델을 바꾸면 컬렉션이 달라져 모든 책이 여기에 해당한다. 재추출이나 Gemini 호출은 하지 않는다.
+    모든 ready 책의 벡터가 갖춰지면 Gemini 시절의 옛 컬렉션을 지운다.
+    """
+    done: list[str] = []
+    complete = True
+    for b in db.list_books():
+        if b["status"] != "ready" or vectors.has_book(b["id"]):
+            continue
+        chunks = db.book_chunks(b["id"])
+        if not chunks:
+            continue
+        try:
+            _reindex(b["id"], chunks)
+            done.append(b["id"])
+        except BookDeleted:
+            _discard_leftovers(b["id"])
+        except Exception as e:  # noqa: BLE001 - 책 하나의 실패가 나머지 재임베딩을 막지 않게 상태로 남긴다
+            log.exception("재임베딩 실패: %s", b["id"])
+            complete = False
+            with _lifecycle:
+                if db.get_book(b["id"]) is not None:
+                    db.update_book(b["id"], status="error", message=f"재임베딩 실패: {e or type(e).__name__}")
+    if complete:
+        if vectors.drop_legacy():
+            log.info("이전 임베딩 컬렉션을 삭제했습니다.")
+    return done
+
+
+def _reindex(book_id: str, chunks: list[db.Chunk]) -> None:
+    log.info("임베딩 모델 변경으로 재임베딩: %s (%d 청크)", book_id, len(chunks))
+    with _lifecycle:
+        _ensure_alive(book_id)
+        db.update_book(book_id, status="indexing", progress=0.0, message="")
+
+    def _progress(f: float) -> None:
+        _ensure_alive(book_id)
+        db.update_book(book_id, progress=f)
+
+    rows = [vars(c) for c in chunks]
+    vectors.index_chunks(book_id, [c.id for c in chunks], rows, on_progress=_progress)
+    with _lifecycle:
+        _ensure_alive(book_id)
+        db.update_book(book_id, status="ready", progress=1.0, message="")
+
+
 def has_odd_display_math(markdown: str) -> bool:
     """`$$` 개수가 홀수이면 수식이 닫히지 않은 것이므로 구조화가 어긋날 수 있다."""
     return markdown.count("$$") % 2 == 1

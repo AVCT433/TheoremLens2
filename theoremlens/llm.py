@@ -1,4 +1,4 @@
-"""Gemini 클라이언트 래퍼."""
+"""Gemini 클라이언트 래퍼(생성·이미지 전사). 임베딩은 `embedder.py`가 로컬 모델로 처리한다."""
 
 from __future__ import annotations
 
@@ -54,20 +54,3 @@ def generate_text(model: str, system: str, contents: Any) -> str:
 
 def image_part(data: bytes, mime: str = "image/png") -> types.Part:
     return types.Part.from_bytes(data=data, mime_type=mime)
-
-
-def embed(texts: list[str], task: str) -> list[list[float]]:
-    """task: RETRIEVAL_DOCUMENT | RETRIEVAL_QUERY"""
-    s = get_settings()
-    out: list[list[float]] = []
-    for i in range(0, len(texts), 64):
-        batch = texts[i : i + 64]
-        res = _retry(
-            lambda batch=batch: client().models.embed_content(
-                model=s.embed_model,
-                contents=batch,
-                config=types.EmbedContentConfig(task_type=task),
-            )
-        )
-        out.extend(e.values for e in res.embeddings)
-    return out

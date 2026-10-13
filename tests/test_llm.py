@@ -1,8 +1,7 @@
-"""llm 래퍼 테스트: 재시도/백오프, 미설정 키, 임베딩 배치."""
+"""llm 래퍼 테스트: 재시도/백오프, 미설정 키."""
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -14,17 +13,12 @@ class _FakeModels:
     def __init__(self, fail_times: int = 0):
         self.fail_times = fail_times
         self.generate_calls = 0
-        self.embed_batches: list[list[str]] = []
 
     def generate_content(self, model, contents, config):
         self.generate_calls += 1
         if self.generate_calls <= self.fail_times:
             raise RuntimeError("transient")
         return SimpleNamespace(text="ok")
-
-    def embed_content(self, model, contents, config):
-        self.embed_batches.append(list(contents))
-        return SimpleNamespace(embeddings=[SimpleNamespace(values=[float(c)]) for c in contents])
 
 
 @pytest.fixture
@@ -66,8 +60,6 @@ def test_generate_json_returns_text_and_retries(monkeypatch, sleeps):
 def test_not_configured_is_never_retried(sleeps):
     with pytest.raises(llm.LLMNotConfigured):
         llm.generate_text("m", "s", "hi")
-    with pytest.raises(llm.LLMNotConfigured):
-        llm.embed(["a"], "RETRIEVAL_QUERY")
     assert sleeps == []
 
 
@@ -82,43 +74,3 @@ def test_retry_helper_does_not_retry_not_configured(sleeps):
         llm._retry(fn)
     assert calls == [1]
     assert sleeps == []
-
-
-def test_embed_splits_into_batches_of_64_and_keeps_order(monkeypatch, sleeps):
-    m = _FakeModels()
-    _use(monkeypatch, m)
-    out = llm.embed([str(i) for i in range(150)], "RETRIEVAL_DOCUMENT")
-    assert [len(b) for b in m.embed_batches] == [64, 64, 22]
-    assert out == [[float(i)] for i in range(150)]
-
-
-def test_embed_empty_makes_no_calls(monkeypatch):
-    m = _FakeModels()
-    _use(monkeypatch, m)
-    assert llm.embed([], "RETRIEVAL_QUERY") == []
-    assert m.embed_batches == []
-
-
-def test_embed_retries_only_the_failed_batch(monkeypatch, sleeps):
-    m = _FakeModels()
-    orig = m.embed_content
-    state = {"n": 0}
-
-    def flaky(model, contents, config):
-        state["n"] += 1
-        if state["n"] == 2:
-            raise RuntimeError("429")
-        return orig(model, contents, config)
-
-    m.embed_content = flaky
-    _use(monkeypatch, m)
-    out = llm.embed([str(i) for i in range(70)], "RETRIEVAL_DOCUMENT")
-    assert len(out) == 70
-    assert sleeps == [1]
-
-
-@pytest.mark.integration
-def test_embed_smoke_real_gemini():
-    if not os.getenv("GEMINI_API_KEY"):
-        pytest.skip("GEMINI_API_KEY unset")
-    assert len(llm.embed(["compact set"], "RETRIEVAL_QUERY")[0]) > 0

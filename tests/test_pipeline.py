@@ -6,8 +6,8 @@ import logging
 
 import pytest
 
-from tests.conftest import bow_vector
-from theoremlens import llm
+from tests.conftest import add_legacy_collection, bow_vector, collection_names
+from theoremlens import embedder
 from theoremlens.config import get_settings
 from theoremlens.index import db, vectors
 from theoremlens.ingest import extract as ex
@@ -172,7 +172,7 @@ def test_book_deleted_during_vector_indexing_leaves_no_vectors(make_pdf, fake_ll
         pipeline.purge_book(bid)  # 임베딩 도중 삭제
         return [bow_vector(t) for t in texts]
 
-    monkeypatch.setattr(llm, "embed", embed_then_delete)
+    monkeypatch.setattr(embedder, "embed", embed_then_delete)
     pipeline.ingest_book(bid, pdf)
 
     assert db.get_book(bid) is None
@@ -248,3 +248,121 @@ def test_resumed_ingest_reuses_extracted_pages(make_pdf, fake_llm, fake_embed):
 
     assert db.get_book(bid)["status"] == "ready"
     assert fake_llm.calls == []  # 이미 있는 스캔 쪽을 다시 전사하지 않는다
+
+
+# ---------- 임베딩 모델 교체 후 재임베딩 ----------
+
+
+def _ready_book_without_vectors(bid: str, *texts: str) -> list[int]:
+    db.create_book(bid, bid, f"{bid}.pdf")
+    rows = [
+        {
+            "ord": i,
+            "unit_type": "theorem",
+            "label": f"theorem {i + 1}",
+            "display_label": f"Theorem {i + 1}",
+            "chapter": None,
+            "section": None,
+            "page_start": 1,
+            "page_end": 1,
+            "text": t,
+            "refs": [],
+        }
+        for i, t in enumerate(texts)
+    ]
+    ids = db.replace_chunks(bid, rows)
+    db.update_book(bid, status="ready", progress=1.0)
+    return ids
+
+
+def test_reindex_missing_embeds_ready_books_that_have_no_vectors(fake_embed, fake_llm):
+    ids = _ready_book_without_vectors("old", "compact sets are closed", "banana bread")
+
+    assert pipeline.reindex_missing() == ["old"]
+
+    assert vectors.has_book("old")
+    assert [i for i, _ in vectors.search("compact sets closed", ["old"], 2)][0] == ids[0]
+    book = db.get_book("old")
+    assert book["status"] == "ready" and book["progress"] == 1.0
+    assert fake_llm.calls == []  # 재추출·Gemini 호출 없이 SQLite 청크만 쓴다
+
+
+def test_reindex_missing_skips_books_that_already_have_vectors(fake_embed):
+    ids = _ready_book_without_vectors("b1", "metric space")
+    vectors.index_chunks("b1", ids, [{"text": "metric space"}])
+    fake_embed.calls.clear()
+
+    assert pipeline.reindex_missing() == []
+    assert fake_embed.calls == []
+
+
+def test_reindex_missing_ignores_unready_books_and_books_without_chunks(fake_embed):
+    db.create_book("empty", "E", "e.pdf")
+    db.update_book("empty", status="ready", progress=1.0)
+    _ready_book_without_vectors("err", "text")
+    db.update_book("err", status="error", message="boom")
+
+    assert pipeline.reindex_missing() == []
+    assert fake_embed.calls == []
+    assert db.get_book("err")["message"] == "boom"
+
+
+def test_reindex_missing_marks_book_indexing_while_embedding(fake_embed, monkeypatch):
+    _ready_book_without_vectors("b1", "text")
+    seen = []
+    orig = embedder.embed
+
+    def spy(texts, task):
+        seen.append(db.get_book("b1")["status"])
+        return orig(texts, task)
+
+    monkeypatch.setattr(embedder, "embed", spy)
+    pipeline.reindex_missing()
+    assert seen == ["indexing"]
+
+
+def test_reindex_missing_drops_legacy_collection_when_all_books_covered(fake_embed):
+    _ready_book_without_vectors("b1", "text")
+    add_legacy_collection()
+
+    pipeline.reindex_missing()
+
+    assert "chunks" not in collection_names()
+
+
+def test_reindex_failure_sets_error_and_keeps_legacy_collection(fake_embed, monkeypatch):
+    _ready_book_without_vectors("bad", "text")
+    _ready_book_without_vectors("good", "other text")
+    add_legacy_collection()
+    real = embedder.embed
+
+    def flaky(texts, task):
+        if any(t.endswith("\ntext") for t in texts):
+            raise RuntimeError("gpu oom")
+        return real(texts, task)
+
+    monkeypatch.setattr(embedder, "embed", flaky)
+
+    done = pipeline.reindex_missing()
+
+    assert done == ["good"]
+    assert db.get_book("bad")["status"] == "error" and "gpu oom" in db.get_book("bad")["message"]
+    assert db.get_book("good")["status"] == "ready"
+    assert "chunks" in collection_names()
+
+
+def test_book_deleted_during_reindex_leaves_no_vectors(fake_embed, monkeypatch):
+    _ready_book_without_vectors("b1", "text")
+    real = embedder.embed
+
+    def embed_then_delete(texts, task):
+        out = real(texts, task)
+        pipeline.purge_book("b1")
+        return out
+
+    monkeypatch.setattr(embedder, "embed", embed_then_delete)
+
+    assert pipeline.reindex_missing() == []
+
+    assert db.get_book("b1") is None
+    assert not vectors.has_book("b1")

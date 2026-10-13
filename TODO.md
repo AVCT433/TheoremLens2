@@ -5,6 +5,7 @@
 ## Next
 
 - [ ] 책별 평가 질문 파일 20~30문항 작성 (사람이 직접, `tests/eval/`), `run_eval.py`로 기준선 측정
+- [ ] 로컬 임베딩(bge-m3)에 맞춰 `min_similarity` 재튜닝 (현재 0.55는 Gemini 기준값). 평가 질문 파일이 있어야 가능
 - [ ] 임계값·청크 크기 튜닝 (`MATCH_THRESHOLD=90`, `min_similarity=0.55`, 청크 2000자). 하나씩 바꾸고 재측정, `architecture.md` 같이 갱신
 
 ## Later
@@ -20,6 +21,7 @@
 
 ## Done
 
+- [x] 임베딩을 Gemini에서 로컬 모델(sentence-transformers, bge-m3)로 전환하고 모델별 컬렉션 + 자동 재임베딩 추가
 - [x] 백엔드(ingest, index, rag, app)와 프런트엔드 기본 구현
 - [x] 품질 평가 러너 `tests/eval/run_eval.py`
 - [x] 멈춘 인제스트 재개와 삭제 경쟁 조건 처리

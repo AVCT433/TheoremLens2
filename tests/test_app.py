@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import bow_vector
-from theoremlens import llm
+from theoremlens import embedder, llm
 from theoremlens.app import main
 from theoremlens.config import get_settings
 from theoremlens.index import db, vectors
@@ -288,7 +288,7 @@ def test_delete_during_ingest_leaves_nothing_behind(client, make_pdf, fake_llm, 
             assert client.delete(f"/books/{state['bid']}").status_code == 200
         return [bow_vector(t) for t in texts]
 
-    monkeypatch.setattr(llm, "embed", embed_then_delete)
+    monkeypatch.setattr(embedder, "embed", embed_then_delete)
     real = main.pipeline.ingest_book
 
     def ingest(bid, path):
@@ -304,3 +304,31 @@ def test_delete_during_ingest_leaves_nothing_behind(client, make_pdf, fake_llm, 
     assert db.chunks_by_label(["theorem 1.1"], [bid]) == []
     assert vectors._collection().count() == 0
     assert not get_settings().book_dir(bid).exists()
+
+
+def test_startup_reembeds_ready_books_after_embedding_model_change(fake_embed):
+    db.create_book("old", "Old", "old.pdf")
+    db.replace_chunks(
+        "old",
+        [
+            {
+                "ord": 0,
+                "unit_type": "theorem",
+                "label": "theorem 1",
+                "display_label": "Theorem 1",
+                "chapter": None,
+                "section": None,
+                "page_start": 1,
+                "page_end": 1,
+                "text": "compact sets are closed",
+                "refs": [],
+            }
+        ],
+    )
+    db.update_book("old", status="ready", progress=1.0)
+
+    with TestClient(main.create_app(web_dir=None)) as c:
+        main.wait_for_recovery(c.app)
+        st = c.get("/books/old/status").json()
+
+    assert st["status"] == "ready" and vectors.has_book("old")

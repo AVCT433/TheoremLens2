@@ -109,6 +109,7 @@ def _resume_interrupted() -> None:
     for book_id, pdf_path in pipeline.recover_interrupted():
         log.info("중단된 인제스트를 재개합니다: %s", book_id)
         pipeline.ingest_book(book_id, pdf_path)
+    pipeline.reindex_missing()  # 임베딩 모델이 바뀌었다면 ready 책의 벡터를 다시 만든다
 
 
 def wait_for_recovery(app: FastAPI, timeout: float | None = None) -> None:
