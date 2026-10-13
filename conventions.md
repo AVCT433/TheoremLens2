@@ -5,15 +5,17 @@
 ## 공통 규칙
 
 - 페이지 번호는 어디서나 **1-based PDF 페이지 인덱스**이며, 책에 인쇄된 쪽수가 아니다.
-- 모든 Gemini 호출은 `theoremlens/llm.py`를 거친다(재시도, API 키 확인 `LLMNotConfigured`, 임베딩 배치 처리). `genai.Client`를 다른 곳에서 만들지 않는다.
+- 모든 Gemini 호출은 `theoremlens/llm.py`를 거친다(재시도, API 키 확인 `LLMNotConfigured`). `genai.Client`를 다른 곳에서 만들지 않는다. 임베딩은 Gemini가 아니라 로컬 모델이며 `theoremlens/embedder.py`를 거친다.
 - `index/db.py`는 `RLock`으로 보호되는 단일 공유 커넥션을 쓴다. 쓰기에는 `tx()`를 쓴다.
 - 사용자에게 보이는 텍스트와 LLM 프롬프트는 한국어다.
 
 ## 설정
 
-`.env`(`.env.example` 참고)에서 읽는다: `GEMINI_API_KEY`, 모델 이름(`THEOREMLENS_ANSWER_MODEL`, `THEOREMLENS_FAST_MODEL`, `THEOREMLENS_EMBED_MODEL`), `THEOREMLENS_TEXT_EXTRACTOR`(`auto|marker|pymupdf|gemini`), `THEOREMLENS_MAX_UPLOAD_MB`(업로드 상한, 기본 300). 런타임 데이터(SQLite DB, Chroma 인덱스, 책별 파일)는 gitignore된 `data/`에 둔다.
+`.env`(`.env.example` 참고)에서 읽는다: `GEMINI_API_KEY`, 모델 이름(`THEOREMLENS_ANSWER_MODEL`, `THEOREMLENS_FAST_MODEL`, `THEOREMLENS_EMBED_MODEL`은 로컬 HuggingFace 모델, 기본 `BAAI/bge-m3`), 임베딩 실행 설정(`THEOREMLENS_EMBED_DEVICE`, `THEOREMLENS_EMBED_BATCH`, `THEOREMLENS_EMBED_QUERY_PREFIX`, `THEOREMLENS_EMBED_DOC_PREFIX`), `THEOREMLENS_TEXT_EXTRACTOR`(`auto|marker|pymupdf|gemini`), `THEOREMLENS_MAX_UPLOAD_MB`(업로드 상한, 기본 300). 런타임 데이터(SQLite DB, Chroma 인덱스, 책별 파일)는 gitignore된 `data/`에 둔다.
 
-선택 설치: `uv pip install -e ".[marker]"`는 text-PDF의 LaTeX 품질 추출용 Marker를 설치한다(torch 포함).
+임베딩 모델은 첫 실행 때 HuggingFace에서 내려받는다(bge-m3는 약 2.2GB). torch는 `pyproject.toml`에서 CUDA(cu128) 인덱스로 고정되어 있어 `uv sync`만으로 GPU 빌드가 설치된다(macOS 제외).
+
+선택 설치: `uv sync --extra dev --extra marker`는 text-PDF의 LaTeX 품질 추출용 Marker를 설치한다(torch 포함).
 
 ## 코드 스타일 (ruff: `ruff check`, `ruff format`로 강제)
 

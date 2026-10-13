@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-TheoremLens: a local web app that ingests math textbooks (PDF, text-layer or scanned) into a multi-book library and answers questions **only from the book content**, with citations, to minimize hallucination. LLM provider is **Google Gemini** (`google-genai` SDK); do not switch providers.
+TheoremLens: a local web app that ingests math textbooks (PDF, text-layer or scanned) into a multi-book library and answers questions **only from the book content**, with citations, to minimize hallucination. LLM provider is **Google Gemini** (`google-genai` SDK); do not switch providers. Embeddings are computed locally (sentence-transformers, default `BAAI/bge-m3`), not by Gemini.
 
 Status: backend and frontend complete with unit tests; `tests/eval/run_eval.py` written (only a sample question file; real per-book question files still needed). Approved design: `C:\Users\baoro\.claude\plans\bright-snacking-sky.md`.
 
 ## Commands
 
 ```bash
-uv venv .venv && uv pip install -e ".[dev]"
+uv sync --extra dev   # torch는 CUDA(cu128) 인덱스로 고정됨
 .venv/Scripts/python -m pytest                              # all tests (add path::name for one)
 .venv/Scripts/uvicorn theoremlens.app.main:app --reload     # run the app
 ```
@@ -26,7 +26,7 @@ Pipeline: **extract → structure → index → retrieve → answer → verify**
 - No retrieval evidence → answer "not in the book" without calling the LLM.
 - Every claim cites `[S#]`; citation text shown to the user comes from the DB, never from model output.
 - Verification is rules first, LLM second; the LLM cannot revive a claim the rules rejected.
-- Page numbers are 1-based PDF page indices. All Gemini calls go through `theoremlens/llm.py`. Dependency direction `app → rag → index → ingest → (llm, config)`. User-facing text and prompts are Korean.
+- Page numbers are 1-based PDF page indices. All Gemini calls go through `theoremlens/llm.py`; all embeddings go through `theoremlens/embedder.py`. Dependency direction `app → rag → index → ingest → (llm, embedder, config)`. User-facing text and prompts are Korean.
 
 ## TODO 관리
 
