@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS pages (
     book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
     page_no INTEGER NOT NULL,               -- 1부터 시작하는 PDF 쪽 번호
     markdown TEXT NOT NULL,
-    method TEXT NOT NULL,                   -- marker | pymupdf | gemini
+    method TEXT NOT NULL,                   -- mineru (이전 버전: marker | pymupdf | gemini)
     PRIMARY KEY (book_id, page_no)
 );
 CREATE TABLE IF NOT EXISTS chunks (

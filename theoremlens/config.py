@@ -27,7 +27,9 @@ class Settings:
     # e5·nomic처럼 질의/문서 접두어가 필요한 모델용(bge-m3는 필요 없다)
     embed_query_prefix: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_QUERY_PREFIX", ""))
     embed_doc_prefix: str = field(default_factory=lambda: os.getenv("THEOREMLENS_EMBED_DOC_PREFIX", ""))
-    text_extractor: str = field(default_factory=lambda: os.getenv("THEOREMLENS_TEXT_EXTRACTOR", "auto"))
+    # PDF 추출은 MinerU(mineru-kit)가 맡는다. tier: flash|basic|standard|advanced, ocr_mode: auto|txt|ocr
+    mineru_tier: str = field(default_factory=lambda: os.getenv("THEOREMLENS_MINERU_TIER", "standard"))
+    mineru_ocr_mode: str = field(default_factory=lambda: os.getenv("THEOREMLENS_MINERU_OCR_MODE", "auto"))
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("THEOREMLENS_DATA_DIR", ROOT / "data")))
 
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("THEOREMLENS_MAX_UPLOAD_MB", "300")))
@@ -36,8 +38,6 @@ class Settings:
     top_k: int = 8
     # RRF 점수 기준 근거 부족 판정에 쓰는 임베딩 코사인 유사도 하한
     min_similarity: float = 0.55
-    # 페이지에 이 글자 수보다 적으면 스캔 페이지로 간주
-    scanned_char_threshold: int = 40
 
     @property
     def db_path(self) -> Path:

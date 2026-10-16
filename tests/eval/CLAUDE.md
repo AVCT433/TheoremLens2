@@ -17,4 +17,4 @@ Rules:
 - Keep ground-truth files hand-written and reviewed. Do not generate them with the model under test.
 - Out-of-book questions should be plausible, not obviously off-topic (for example a real theorem from a different textbook). Include both Korean and English questions.
 - Write results to `data/` (gitignored) with the model names and date, so runs before and after a model or prompt change can be compared.
-- Store the question files in this folder. Do not store the books themselves; they stay under `data/`, which is gitignored.
+- Store the question files in this folder. Do not store the books themselves; they stay under `data/`, which is gitignored. The shared test book is `data/samples/Enderton_Elements of set theory_(1977).pdf` (Enderton, *Elements of Set Theory*, 289 pages, text layer); copy it from there when setting up a new checkout.

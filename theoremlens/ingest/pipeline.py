@@ -18,7 +18,7 @@ from . import extract, structure
 log = logging.getLogger(__name__)
 
 # 중간에 실패해도 지금까지 추출한 쪽이 남도록 이 쪽 수 단위로 저장한다(재실행 시 캐시로 재사용)
-EXTRACT_BATCH = 20
+EXTRACT_BATCH = 100
 # 진행률 배분: 추출 0~0.5, 색인 0.5~1.0
 _EXTRACT_SHARE = 0.5
 

@@ -25,8 +25,8 @@ def _chroma_count() -> int:
     return vectors._collection().count()
 
 
-def test_ingest_mixed_pdf_fills_pages_chunks_vectors_and_marks_ready(make_pdf, fake_llm, fake_embed):
-    fake_llm.default_text = SCAN_MD
+def test_ingest_mixed_pdf_fills_pages_chunks_vectors_and_marks_ready(make_pdf, fake_mineru, fake_llm, fake_embed):
+    fake_mineru.scan_text = SCAN_MD
     pdf = make_pdf(["text", "scan", "text"])
     bid = _book(pdf)
 
@@ -38,23 +38,24 @@ def test_ingest_mixed_pdf_fills_pages_chunks_vectors_and_marks_ready(make_pdf, f
     assert book["num_pages"] == 3
     pages = {p["page_no"]: p for p in db.get_pages(bid)}
     assert sorted(pages) == [1, 2, 3]
-    assert pages[2]["method"] == "gemini" and pages[1]["method"] == "pymupdf"
+    assert {p["method"] for p in pages.values()} == {"mineru"}
     chunks = db.chunks_by_label(["theorem 9.1"], [bid])
     assert chunks and chunks[0].page_start == 2
     assert _chroma_count() == db.list_books()[0]["num_chunks"] > 0
-    assert len(fake_llm.calls) == 1  # 스캔 쪽 하나만 Gemini 전사
+    assert fake_mineru.requested == [[1, 2, 3]]
+    assert fake_llm.calls == []  # 추출에는 Gemini를 쓰지 않는다
 
 
-def test_rerun_skips_pages_already_in_db(make_pdf, fake_llm, fake_embed):
-    fake_llm.default_text = SCAN_MD
+def test_rerun_skips_pages_already_in_db(make_pdf, fake_mineru, fake_embed):
+    fake_mineru.scan_text = SCAN_MD
     pdf = make_pdf(["text", "scan"])
     bid = _book(pdf)
     pipeline.ingest_book(bid, pdf)
-    assert len(fake_llm.calls) == 1
+    assert len(fake_mineru.requested) == 1
 
     pipeline.ingest_book(bid, pdf)
 
-    assert len(fake_llm.calls) == 1  # 이미 추출된 스캔 쪽은 다시 전사하지 않는다
+    assert len(fake_mineru.requested) == 1  # 이미 추출된 쪽은 MinerU를 다시 부르지 않는다
     assert db.get_book(bid)["status"] == "ready"
     assert _chroma_count() == db.list_books()[0]["num_chunks"]  # 벡터가 중복되지 않는다
 
@@ -78,27 +79,20 @@ def test_rerun_only_extracts_missing_pages(make_pdf, fake_llm, fake_embed, monke
     assert db.get_page(bid, 3) is not None
 
 
-def test_failure_sets_error_status_and_message(make_pdf, fake_llm, fake_embed):
-    pdf = make_pdf(["scan"])
+def test_mineru_failure_sets_error_status_and_saves_no_page(make_pdf, fake_embed, monkeypatch):
+    pdf = make_pdf(["text", "scan"])
     bid = _book(pdf)
 
     def boom(*a, **k):
-        raise RuntimeError("전사 실패 테스트")
+        raise RuntimeError("mineru 실패 테스트")
 
-    fake_llm.text_responses = [boom]
+    monkeypatch.setattr(ex, "_run_mineru", boom)
     pipeline.ingest_book(bid, pdf)  # 백그라운드 작업이므로 예외를 밖으로 던지지 않는다
 
     book = db.get_book(bid)
     assert book["status"] == "error"
-    assert "전사 실패 테스트" in book["message"]
-
-
-def test_missing_api_key_reports_error_for_scanned_pdf(make_pdf):
-    pdf = make_pdf(["scan"])
-    bid = _book(pdf)
-    pipeline.ingest_book(bid, pdf)
-    book = db.get_book(bid)
-    assert book["status"] == "error" and "GEMINI_API_KEY" in book["message"]
+    assert "mineru 실패 테스트" in book["message"]
+    assert db.get_pages(bid) == []  # PyMuPDF 등으로 대체해 깨진 텍스트를 저장하지 않는다
 
 
 def test_blank_pdf_without_content_is_error(make_pdf, fake_llm, fake_embed):
@@ -128,8 +122,8 @@ def test_progress_is_monotonic_and_status_passes_through_stages(make_pdf, fake_l
     assert progress == sorted(progress)
 
 
-def test_odd_display_math_page_logs_warning(make_pdf, fake_llm, fake_embed, caplog):
-    fake_llm.default_text = "Theorem 1.1 $$ x = 1"
+def test_odd_display_math_page_logs_warning(make_pdf, fake_mineru, fake_embed, caplog):
+    fake_mineru.scan_text = "Theorem 1.1 $$ x = 1"
     pdf = make_pdf(["scan"])
     bid = _book(pdf)
     with caplog.at_level(logging.WARNING, logger="theoremlens.ingest.pipeline"):
@@ -233,21 +227,21 @@ def test_recover_interrupted_marks_book_without_pdf_as_error():
     assert book["status"] == "error" and book["message"]
 
 
-def test_resumed_ingest_reuses_extracted_pages(make_pdf, fake_llm, fake_embed):
-    fake_llm.default_text = SCAN_MD
+def test_resumed_ingest_reuses_extracted_pages(make_pdf, fake_mineru, fake_embed):
+    fake_mineru.scan_text = SCAN_MD
     pdf = make_pdf(["text", "scan"])
     bid = _book(pdf)
     d = get_settings().book_dir(bid)
     d.mkdir(parents=True)
     (d / "book.pdf").write_bytes(pdf.read_bytes())
-    db.save_page(bid, 2, SCAN_MD, "gemini")  # 재시작 전에 이미 전사된 쪽
+    db.save_page(bid, 2, SCAN_MD, "mineru")  # 재시작 전에 이미 추출된 쪽
     db.update_book(bid, status="extracting")
 
     for b, p in pipeline.recover_interrupted():
         pipeline.ingest_book(b, p)
 
     assert db.get_book(bid)["status"] == "ready"
-    assert fake_llm.calls == []  # 이미 있는 스캔 쪽을 다시 전사하지 않는다
+    assert fake_mineru.requested == [[1]]  # 이미 있는 2쪽은 다시 변환하지 않는다
 
 
 # ---------- 임베딩 모델 교체 후 재임베딩 ----------

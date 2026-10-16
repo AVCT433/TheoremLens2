@@ -18,6 +18,9 @@ from chromadb.api.shared_system_client import SharedSystemClient
 from theoremlens import embedder, llm
 from theoremlens.config import get_settings
 from theoremlens.index import db, vectors
+from theoremlens.ingest import extract as _extract
+
+_REAL_RUN_MINERU = _extract._run_mineru
 
 
 def _release() -> None:
@@ -41,7 +44,6 @@ def _isolate(tmp_path, monkeypatch, request) -> Iterator[None]:
     monkeypatch.setenv("THEOREMLENS_DATA_DIR", str(tmp_path / "data"))
     if "integration" not in request.keywords:
         monkeypatch.setenv("GEMINI_API_KEY", "")
-    monkeypatch.delenv("THEOREMLENS_TEXT_EXTRACTOR", raising=False)
     if "integration" not in request.keywords:
         # 실수로 실제 로컬 모델을 내려받거나 로드하지 않도록 막는다(Gemini 키를 비우는 것과 같은 이유)
         def _blocked():
@@ -128,6 +130,49 @@ def fake_llm(monkeypatch) -> FakeLLM:
     monkeypatch.setattr(llm, "generate_text", f.generate_text)
     monkeypatch.setattr(llm, "generate_json", f.generate_json)
     return f
+
+
+@dataclass
+class FakeMineru:
+    """`extract._run_mineru`를 대신한다: PDF의 텍스트 레이어를 middle_json 한 블록으로 써 준다.
+
+    텍스트가 없는 쪽(스캔)은 `scan_text`를 쓰고, 이미지도 없으면 빈 쪽이다. `requested`는 호출마다 받은 쪽 목록.
+    """
+
+    scan_text: str = "scanned page text"
+    requested: list[list[int]] = field(default_factory=list)
+
+    def run(self, pdf_path: Path, pages: list[int], out_path: Path) -> None:
+        import json
+
+        import pymupdf
+
+        self.requested.append(list(pages))
+        out = []
+        with pymupdf.open(pdf_path) as doc:
+            for p in pages:
+                page = doc[p - 1]
+                text = page.get_text("text").strip()
+                if not text and page.get_images():
+                    text = self.scan_text
+                blocks = [{"type": "text", "content": [{"type": "text", "content": text}]}] if text else []
+                out.append({"page_idx": p - 1, "blocks": blocks})
+        out_path.write_text(json.dumps({"pages": out}), encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def fake_mineru(monkeypatch, request) -> FakeMineru:
+    """실제 MinerU(모델 로딩, 수 분)가 단위 테스트에서 돌지 않게 항상 가짜로 바꾼다."""
+    f = FakeMineru()
+    if "integration" not in request.keywords:
+        monkeypatch.setattr(_extract, "_run_mineru", f.run)
+    return f
+
+
+@pytest.fixture
+def real_run_mineru():
+    """가짜로 바뀌기 전의 `_run_mineru`. subprocess를 가로채는 명령 조립 테스트용."""
+    return _REAL_RUN_MINERU
 
 
 @pytest.fixture

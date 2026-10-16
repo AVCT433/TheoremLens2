@@ -50,7 +50,3 @@ def generate_json(model: str, system: str, contents: Any, schema: dict) -> str:
 def generate_text(model: str, system: str, contents: Any) -> str:
     cfg = types.GenerateContentConfig(system_instruction=system, temperature=0)
     return _retry(lambda: client().models.generate_content(model=model, contents=contents, config=cfg)).text or ""
-
-
-def image_part(data: bytes, mime: str = "image/png") -> types.Part:
-    return types.Part.from_bytes(data=data, mime_type=mime)

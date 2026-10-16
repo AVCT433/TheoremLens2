@@ -6,7 +6,7 @@
 
 ```
 PDF 업로드
-  └─ [ingest/extract]    쪽별 분류 → Marker/PyMuPDF 또는 Gemini 비전 → 쪽별 Markdown (pages 테이블)
+  └─ [ingest/extract]    MinerU(middle_json) → 쪽별 Markdown (pages 테이블)
   └─ [ingest/structure]  수학 단위 분할 → ChunkDraft (label, refs, 장/절, 쪽 범위)
   └─ [index]             SQLite chunks(+FTS5)  /  Chroma 벡터(로컬 임베딩)
 질문
@@ -34,12 +34,12 @@ PDF 업로드
 | `embed_batch` | `THEOREMLENS_EMBED_BATCH` | `8` |
 | `embed_max_seq_length` | `THEOREMLENS_EMBED_MAX_SEQ` | `1024` |
 | `embed_query_prefix`, `embed_doc_prefix` | `THEOREMLENS_EMBED_QUERY_PREFIX`, `THEOREMLENS_EMBED_DOC_PREFIX` | `""` (e5·nomic 같은 접두어 모델용) |
-| `text_extractor` | `THEOREMLENS_TEXT_EXTRACTOR` | `auto` (`auto|marker|pymupdf|gemini`) |
+| `mineru_tier` | `THEOREMLENS_MINERU_TIER` | `advanced` (`flash|basic|standard|advanced`) |
+| `mineru_ocr_mode` | `THEOREMLENS_MINERU_OCR_MODE` | `auto` (`auto|txt|ocr`) |
 | `data_dir` | `THEOREMLENS_DATA_DIR` | `<repo>/data` |
 | `max_upload_mb` | `THEOREMLENS_MAX_UPLOAD_MB` | `300` |
 | `top_k` | (고정) | `8` |
 | `min_similarity` | (고정) | `0.55` (코사인 유사도 하한) |
-| `scanned_char_threshold` | (고정) | `40` |
 
 ```
 data/                      (gitignored)
@@ -53,17 +53,20 @@ data/                      (gitignored)
 Gemini 호출은 전부 `llm.py`를 거치며, `genai.Client`는 여기서만 만든다. 임베딩은 Gemini가 아니라 로컬 모델이며 `embedder.py`가 맡는다.
 
 - `generate_json(model, system, contents, schema) -> str`: temperature 0, `response_mime_type="application/json"`, 스키마 제약 출력.
-- `generate_text(model, system, contents) -> str`, `image_part(data, mime)`.
+- `generate_text(model, system, contents) -> str`.
 - **재시도**: 총 4회, 실패 시 1·2·4초 대기. `LLMNotConfigured`(키 없음)는 재시도하지 않고 즉시 올린다.
 - **`embedder.embed(texts, task) -> list[list[float]]`** (`task`는 `"document"` / `"query"`): sentence-transformers 모델을 프로세스당 한 번 로드(락)하고, L2 정규화한 벡터를 입력 순서대로 돌려준다. 접두어 설정을 task별로 붙이고, 빈 입력이면 모델을 로드하지 않는다. 디바이스 `auto`는 CUDA가 있으면 cuda, 없으면 cpu. API 키·네트워크가 필요 없다(모델 최초 다운로드 제외).
 - 테스트에서는 이 모듈의 속성만 patch한다(`tests/CLAUDE.md`).
 
 ## 4. 추출 (`ingest/extract.py`)
 
-- **쪽 분류** (`classify_pages`): 텍스트 레이어 길이가 `scanned_char_threshold`(40) 이상이면 텍스트 쪽. 미만이면서 이미지가 있으면 스캔 쪽. 미만이고 이미지도 없으면(거의 빈 쪽) 텍스트 쪽으로 둔다.
-- **텍스트 쪽**: `auto`이면 Marker가 설치돼 있을 때 Marker, 아니면 PyMuPDF(`get_text("text", sort=True)`). Marker가 실패하면 로그를 남기고 PyMuPDF로 대체한다. Marker 출력은 쪽 구분자(`{N}-----…`, 0-based)로 나눠 `+1` 한다.
-- **스캔 쪽**: 200dpi PNG로 렌더링해 `fast_model`에 보내 Markdown+LaTeX로 전사한다. 프롬프트는 "한 글자도 바꾸지 않기, 수식은 `$`/`$$`, 장/절은 `#` 헤딩, 쪽 번호·반복 제목 생략, 판독 불가는 `[판독 불가]`"를 요구한다. 응답의 코드 펜스는 제거한다. `ThreadPoolExecutor(max_workers=4)`로 병렬 처리한다.
-- **출력**: `PageText(page_no, markdown, method)` (`method`: `marker|pymupdf|gemini`). `extract(pdf, on_page, skip)`는 `skip`에 든 쪽을 건너뛴다.
+- **변환**: 텍스트 레이어 쪽도 스캔 쪽도 구분하지 않고 모든 쪽을 MinerU(`mineru-kit parse --format middle_json`)가 변환한다(`extract_mineru`). `mineru` 패키지는 프로젝트 의존성이고, 실행 파일은 현재 인터프리터 환경의 `mineru-kit`를 쓴다(`_run_mineru`가 subprocess로 호출하는 유일한 지점). tier와 OCR 모드는 `mineru_tier`, `mineru_ocr_mode`로 정한다. Gemini는 쓰지 않는다.
+- **쪽 번호**: middle_json의 `pages[].page_idx`(0-based)에 `+1`해 `PageText.page_no`(1-based)로 둔다. 요청한 쪽이 출력에 없거나 JSON을 읽을 수 없거나 종료 코드가 0이 아니면 `RuntimeError`를 던지고, PyMuPDF 등으로 대체하지 않는다. 파이프라인이 책을 `error`로 만들고, 재시도하면 이미 저장된 쪽은 건너뛴다.
+- **블록 → Markdown** (`blocks_to_markdown`, 순수 함수): `doc_title`/`paragraph_title`은 `level`만큼 `#`, `text`/`page_footnote`는 글자 그대로 이어 붙이되 `equation_inline`은 `$…$`, `equation`은 `$$
+…
+$$`, `list`는 항목마다 한 줄, `table`은 `table_body` HTML을 두고 `<eq>…</eq>`만 `$…$`로 바꾼다. `image`/`chart`는 캡션만 `[그림: 캡션]`으로 남기고 본문(도형 속 글자·차트 표)은 버린다. `header`와 `page_number`는 버린다. 알 수 없는 타입은 경고 로그를 남기고 텍스트만 유지한다. 블록은 빈 줄로 잇는다.
+- **PyMuPDF**는 쪽 수(`page_count`)와 미리보기 PNG(`render_page_png`)에만 쓴다.
+- **출력**: `PageText(page_no, markdown, method)` (`method`: `mineru`). `extract(pdf, on_page, skip)`는 `skip`에 든 쪽을 뺀 나머지를 한 번에 변환하고(파이프라인이 100쪽 배치로 부른다), 남은 쪽이 없으면 MinerU를 부르지 않는다. 이전 버전이 저장한 `marker|pymupdf|gemini` 쪽은 DB에 그대로 남는다.
 - 추출 결과는 **원문 그대로**다. 요약하거나 고치지 않는다. 이후 인용 검증이 이 텍스트와 대조되기 때문이다.
 
 ## 5. 구조 분석 (`ingest/structure.py`)
@@ -92,7 +95,7 @@ queued → extracting (진행률 0~0.5) → indexing (0.5~1.0) → ready
 ```
 
 1. `num_pages` 기록, `extracting`.
-2. 이미 `pages`에 있는 쪽을 제외하고 **20쪽 배치**(`EXTRACT_BATCH`)로 추출해 쪽마다 `db.save_page`(INSERT OR REPLACE). 중간에 실패해도 추출한 쪽이 남고, 재실행하면 건너뛴다. 진행률은 `0.5 × 완료쪽/전체`.
+2. 이미 `pages`에 있는 쪽을 제외하고 **100쪽 배치**(`EXTRACT_BATCH`)로 추출해 쪽마다 `db.save_page`(INSERT OR REPLACE). 중간에 실패해도 추출한 쪽이 남고, 재실행하면 건너뛴다. 진행률은 `0.5 × 완료쪽/전체`.
 3. `$$`가 홀수인 쪽은 경고 로그(추출 오류 신호; 이후 내용이 한 청크로 뭉칠 수 있다).
 4. `structure.build_chunks`. 청크가 0개면 `IngestError("PDF에서 추출된 텍스트가 없습니다.")`.
 5. `indexing` → `db.replace_chunks`(전부 교체) → `vectors.index_chunks`(해당 책 벡터를 지운 뒤 다시 추가; 진행률 `0.5 + 0.5f`).

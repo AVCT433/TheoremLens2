@@ -1,183 +1,310 @@
-"""ingest/extract 테스트: 쪽 분류, skip, 1-based 번호, Marker 대체, 코드 펜스 제거."""
+"""ingest/extract 테스트: 블록→Markdown 변환, MinerU 호출 조립, 1-based 쪽 번호, skip."""
 
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 import pymupdf
 import pytest
 
-from theoremlens.config import get_settings
 from theoremlens.ingest import extract as ex
 
-LONG = "Theorem 1.1 every compact subset of a metric space is closed and bounded."
+
+def _txt(s: str) -> dict:
+    return {"type": "text", "content": s}
 
 
-def _make_pdf(path: Path, kinds: list[str]) -> Path:
-    """kinds: 'text' | 'scan' | 'blank' | 'short'. 반환한 PDF는 테스트 안에서만 쓰는 임시 파일."""
+def _eq(s: str) -> dict:
+    return {"type": "equation_inline", "content": s}
+
+
+def _block(type_: str, content, **extra) -> dict:
+    return {"type": type_, "index": 0, "bbox": [0, 0, 1, 1], "content": content, **extra}
+
+
+def _write_middle(path: Path, pages: dict[int, list[dict]]) -> None:
+    """pages: 0-based page_idx -> blocks."""
+    path.write_text(
+        json.dumps({"pages": [{"page_idx": i, "blocks": b} for i, b in pages.items()]}),
+        encoding="utf-8",
+    )
+
+
+def _pdf(path: Path, n: int) -> Path:
     doc = pymupdf.open()
-    for i, kind in enumerate(kinds, start=1):
-        page = doc.new_page()
-        if kind == "text":
-            page.insert_text((72, 100), f"{LONG} page {i}")
-        elif kind == "short":
-            page.insert_text((72, 100), "x" * 5)
-        elif kind == "scan":
-            pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 100), False)
-            pix.clear_with(200)
-            page.insert_image(pymupdf.Rect(72, 72, 272, 172), pixmap=pix)
+    for i in range(1, n + 1):
+        doc.new_page().insert_text((72, 100), f"page {i}")
     doc.save(path)
     doc.close()
     return path
+
+
+# ---------- page_count / render ----------
 
 
 def test_page_count(tmp_path):
-    assert ex.page_count(_make_pdf(tmp_path / "a.pdf", ["text", "scan", "blank"])) == 3
+    assert ex.page_count(_pdf(tmp_path / "a.pdf", 3)) == 3
 
 
-def test_classify_pages_mixed_uses_one_based_numbers(tmp_path):
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text", "scan", "text", "scan"])
-    assert ex.classify_pages(pdf) == ([1, 3], [2, 4])
+def test_render_page_png_returns_png_bytes(tmp_path):
+    assert ex.render_page_png(_pdf(tmp_path / "a.pdf", 2), 2).startswith(b"\x89PNG")
 
 
-def test_classify_blank_page_without_images_counts_as_text(tmp_path):
-    pdf = _make_pdf(tmp_path / "a.pdf", ["blank", "scan"])
-    assert ex.classify_pages(pdf) == ([1], [2])
+# ---------- page_ranges ----------
 
 
-def _pdf_with_n_chars(path: Path, n: int, with_image: bool) -> Path:
-    doc = pymupdf.open()
-    page = doc.new_page()
-    if n:
-        page.insert_text((72, 100), "a" * n)
-    if with_image:
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 50, 50), False)
-        page.insert_image(pymupdf.Rect(72, 200, 122, 250), pixmap=pix)
-    doc.save(path)
-    doc.close()
-    return path
+@pytest.mark.parametrize(
+    "pages, expected",
+    [
+        ([5], "5"),
+        ([1, 2, 3], "1-3"),
+        ([1, 2, 3, 7, 9, 10], "1-3,7,9-10"),
+        ([10, 3, 4, 3], "3-4,10"),  # 순서·중복에 무관
+    ],
+)
+def test_page_ranges(pages, expected):
+    assert ex.page_ranges(pages) == expected
 
 
-def test_classify_pages_threshold_boundary(tmp_path):
-    t = get_settings().scanned_char_threshold
-    at = _pdf_with_n_chars(tmp_path / "at.pdf", t, with_image=True)
-    below = _pdf_with_n_chars(tmp_path / "below.pdf", t - 1, with_image=True)
-    assert ex.classify_pages(at) == ([1], [])  # 정확히 임계값이면 텍스트 쪽
-    assert ex.classify_pages(below) == ([], [1])
+# ---------- blocks_to_markdown ----------
 
 
-def test_classify_short_text_without_image_is_not_scanned(tmp_path):
-    pdf = _make_pdf(tmp_path / "a.pdf", ["short"])
-    assert ex.classify_pages(pdf) == ([1], [])
+def test_titles_use_level_and_text_keeps_inline_math():
+    md = ex.blocks_to_markdown(
+        [
+            _block("doc_title", [_txt("RELATIONS AND FUNCTIONS")], level=1),
+            _block("paragraph_title", [_txt("ORDERED PAIRS")], level=2),
+            _block("text", [_txt("Let "), _eq("B"), _txt(" be a set.")]),
+        ]
+    )
+    assert md == "# RELATIONS AND FUNCTIONS\n\n## ORDERED PAIRS\n\nLet $B$ be a set."
 
 
-def test_extract_text_pdf_uses_pymupdf_without_llm(tmp_path, fake_llm, monkeypatch):
-    monkeypatch.setattr(ex, "_marker_available", lambda: False)
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text", "text"])
+def test_display_equation_becomes_dollar_block_unsplit():
+    md = ex.blocks_to_markdown([_block("equation", "\\langle x, y \\rangle = \\langle u, v \\rangle ,")])
+    assert md == "$$\n\\langle x, y \\rangle = \\langle u, v \\rangle ,\n$$"
+    assert md.count("$$") == 2
+
+
+def test_header_and_page_number_are_dropped():
+    md = ex.blocks_to_markdown(
+        [
+            _block("page_number", [_txt("34")]),
+            _block("header", [_txt("2. Axioms and Operations")]),
+            _block("text", [_txt("body")]),
+        ]
+    )
+    assert md == "body"
+
+
+def test_list_items_each_on_own_line():
+    md = ex.blocks_to_markdown(
+        [
+            _block(
+                "list", [_block("text", [_txt("(b) 0 is ordinal.")]), _block("text", [_txt("(c) If "), _eq("\\alpha")])]
+            )
+        ]
+    )
+    assert md == "(b) 0 is ordinal.\n(c) If $\\alpha$"
+
+
+def test_footnote_is_kept_as_text():
+    md = ex.blocks_to_markdown([_block("page_footnote", [_eq("^{1}"), _txt("  Other chapters.")])])
+    assert md == "$^{1}$  Other chapters."
+
+
+def test_image_and_chart_keep_only_caption_as_figure_marker():
+    md = ex.blocks_to_markdown(
+        [
+            _block(
+                "image", [_block("image_body", "A\nB"), _block("image_caption", [_txt("(a)")])], sub_type="text_image"
+            ),
+            _block(
+                "chart",
+                [
+                    _block("chart_body", "| a |\n| - |"),
+                    _block("chart_caption", [_txt("Fig. 20. A line in "), _eq("\\omega")]),
+                ],
+            ),
+        ]
+    )
+    assert md == "[그림: (a)]\n\n[그림: Fig. 20. A line in $\\omega$]"
+
+
+def test_image_without_caption_is_bare_marker():
+    assert ex.blocks_to_markdown([_block("image", [_block("image_body", "x")])]) == "[그림]"
+
+
+def test_table_html_keeps_cells_and_converts_eq_tags_to_math():
+    html = "<table><tr><td><eq>\\in</eq></td><td>1</td></tr></table>"
+    md = ex.blocks_to_markdown([_block("table", [_block("table_body", html)])])
+    assert md == "<table><tr><td>$\\in$</td><td>1</td></tr></table>"
+
+
+def test_unknown_block_type_text_is_kept_and_logged(caplog):
+    with caplog.at_level("WARNING"):
+        md = ex.blocks_to_markdown([_block("mystery", [_txt("keep me")])])
+    assert md == "keep me"
+    assert "mystery" in caplog.text
+
+
+def test_blocks_without_text_are_skipped():
+    assert ex.blocks_to_markdown([_block("text", [])]) == ""
+
+
+# ---------- extract_mineru ----------
+
+
+def test_extract_mineru_maps_zero_based_page_idx_to_one_based(tmp_path, monkeypatch):
+    seen = {}
+
+    def run(pdf_path, pages, out_path):
+        seen["pages"] = pages
+        _write_middle(out_path, {2: [_block("text", [_txt("third")])], 4: [_block("text", [_txt("fifth")])]})
+
+    monkeypatch.setattr(ex, "_run_mineru", run)
+    got = ex.extract_mineru(tmp_path / "x.pdf", [3, 5])
+    assert seen["pages"] == [3, 5]
+    assert [(p.page_no, p.markdown, p.method) for p in got] == [(3, "third", "mineru"), (5, "fifth", "mineru")]
+
+
+def test_extract_mineru_ignores_pages_that_were_not_requested(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ex,
+        "_run_mineru",
+        lambda pdf, pages, out: _write_middle(
+            out, {0: [_block("text", [_txt("a")])], 1: [_block("text", [_txt("b")])]}
+        ),
+    )
+    assert [p.page_no for p in ex.extract_mineru(tmp_path / "x.pdf", [2])] == [2]
+
+
+def test_extract_mineru_missing_page_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ex, "_run_mineru", lambda pdf, pages, out: _write_middle(out, {0: [_block("text", [_txt("a")])]})
+    )
+    with pytest.raises(RuntimeError, match="2"):
+        ex.extract_mineru(tmp_path / "x.pdf", [1, 2])
+
+
+def test_extract_mineru_page_with_no_blocks_is_empty_not_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(ex, "_run_mineru", lambda pdf, pages, out: _write_middle(out, {0: []}))
+    got = ex.extract_mineru(tmp_path / "x.pdf", [1])
+    assert got[0].markdown == ""
+
+
+def test_extract_mineru_bad_json_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(ex, "_run_mineru", lambda pdf, pages, out: out.write_text("not json", encoding="utf-8"))
+    with pytest.raises(RuntimeError):
+        ex.extract_mineru(tmp_path / "x.pdf", [1])
+
+
+# ---------- _run_mineru (subprocess 조립) ----------
+
+
+def test_run_mineru_builds_command_from_settings(tmp_path, monkeypatch, real_run_mineru):
+    monkeypatch.setenv("THEOREMLENS_MINERU_TIER", "standard")
+    monkeypatch.setenv("THEOREMLENS_MINERU_OCR_MODE", "ocr")
+    from theoremlens.config import get_settings
+
+    get_settings.cache_clear()
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    real_run_mineru(tmp_path / "b.pdf", [1, 2, 3, 9], tmp_path / "o.json")
+    cmd, kw = calls[0]
+    assert Path(cmd[0]).stem == "mineru-kit" or cmd[0] == "mineru-kit"
+    assert cmd[1:3] == ["parse", str(tmp_path / "b.pdf")]
+    flags = dict(zip(cmd[3::2], cmd[4::2], strict=False))
+    assert flags == {
+        "-o": str(tmp_path / "o.json"),
+        "--format": "middle_json",
+        "--tier": "standard",
+        "--ocr-mode": "ocr",
+        "--pages": "1-3,9",
+    }
+    assert kw.get("check") is not True  # 실패 메시지를 직접 만들기 위해 returncode를 본다
+
+
+def test_run_mineru_failure_raises_with_stderr_tail(tmp_path, monkeypatch, real_run_mineru):
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, b"", ("x" * 5000 + "BOOM").encode())
+    )
+    with pytest.raises(RuntimeError) as e:
+        real_run_mineru(tmp_path / "b.pdf", [1], tmp_path / "o.json")
+    assert "BOOM" in str(e.value)
+    assert len(str(e.value)) < 3000
+
+
+def test_run_mineru_missing_executable_raises_runtime_error(tmp_path, monkeypatch, real_run_mineru):
+    def boom(cmd, **kw):
+        raise FileNotFoundError(cmd[0])
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="mineru"):
+        real_run_mineru(tmp_path / "b.pdf", [1], tmp_path / "o.json")
+
+
+# ---------- extract ----------
+
+
+def test_extract_returns_sorted_one_based_pages(tmp_path, fake_mineru):
+    pdf = _pdf(tmp_path / "a.pdf", 3)
     got = ex.extract(pdf)
-    assert [(p.page_no, p.method) for p in got] == [(1, "pymupdf"), (2, "pymupdf")]
-    assert "compact subset" in got[0].markdown
-    assert got[1].markdown.endswith("page 2")
-    assert not fake_llm.calls
+    assert [p.page_no for p in got] == [1, 2, 3]
+    assert all(p.method == "mineru" for p in got)
+    assert "page 2" in got[1].markdown
 
 
-def test_extract_mixed_pdf_routes_scans_to_gemini_and_sorts(tmp_path, fake_llm, monkeypatch):
-    monkeypatch.setattr(ex, "_marker_available", lambda: False)
-    fake_llm.default_text = "전사된 쪽"
-    pdf = _make_pdf(tmp_path / "a.pdf", ["scan", "text", "scan"])
-    got = ex.extract(pdf)
-    assert [(p.page_no, p.method) for p in got] == [(1, "gemini"), (2, "pymupdf"), (3, "gemini")]
-    assert got[0].markdown == "전사된 쪽"
-    assert len(fake_llm.calls) == 2
-    assert all(c["kind"] == "text" and c["model"] == get_settings().fast_model for c in fake_llm.calls)
+def test_extract_skip_excludes_cached_pages(tmp_path, fake_mineru):
+    pdf = _pdf(tmp_path / "a.pdf", 4)
+    got = ex.extract(pdf, skip={1, 3})
+    assert [p.page_no for p in got] == [2, 4]
+    assert fake_mineru.requested == [[2, 4]]
 
 
-def test_extract_skip_excludes_cached_pages(tmp_path, fake_llm, monkeypatch):
-    monkeypatch.setattr(ex, "_marker_available", lambda: False)
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text", "scan", "text"])
-    got = ex.extract(pdf, skip={1, 2})
-    assert [p.page_no for p in got] == [3]
-    assert not fake_llm.calls
-
-
-def test_extract_skip_everything_returns_empty(tmp_path, fake_llm):
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text", "scan"])
+def test_extract_skip_everything_does_not_call_mineru(tmp_path, fake_mineru):
+    pdf = _pdf(tmp_path / "a.pdf", 2)
     assert ex.extract(pdf, skip={1, 2}) == []
-    assert not fake_llm.calls
+    assert fake_mineru.requested == []
 
 
-def test_extract_calls_on_page_once_per_page(tmp_path, fake_llm, monkeypatch):
-    monkeypatch.setattr(ex, "_marker_available", lambda: False)
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text", "scan", "text"])
+def test_extract_calls_on_page_once_per_page(tmp_path, fake_mineru):
+    pdf = _pdf(tmp_path / "a.pdf", 3)
     n = []
     ex.extract(pdf, on_page=lambda: n.append(1))
     assert len(n) == 3
 
 
-def test_marker_failure_falls_back_to_pymupdf(tmp_path, fake_llm, monkeypatch):
-    monkeypatch.setenv("THEOREMLENS_TEXT_EXTRACTOR", "marker")
-    get_settings.cache_clear()
+def test_extract_failure_propagates(tmp_path, monkeypatch, fake_mineru):
+    def boom(pdf, pages, out):
+        raise RuntimeError("mineru 실패")
 
-    def boom(pdf_path, pages):
-        raise RuntimeError("marker crashed")
-
-    monkeypatch.setattr(ex, "extract_marker", boom)
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text"])
-    got = ex.extract(pdf)
-    assert [(p.page_no, p.method) for p in got] == [(1, "pymupdf")]
-    assert "compact subset" in got[0].markdown
+    monkeypatch.setattr(ex, "_run_mineru", boom)
+    with pytest.raises(RuntimeError, match="mineru"):
+        ex.extract(_pdf(tmp_path / "a.pdf", 1))
 
 
-def test_marker_success_is_used_when_available(tmp_path, monkeypatch):
-    monkeypatch.setenv("THEOREMLENS_TEXT_EXTRACTOR", "marker")
-    get_settings.cache_clear()
-    monkeypatch.setattr(ex, "extract_marker", lambda p, pages: [ex.PageText(n, "M", "marker") for n in pages])
-    got = ex.extract(_make_pdf(tmp_path / "a.pdf", ["text", "text"]))
-    assert [p.method for p in got] == ["marker", "marker"]
+def test_extract_makes_no_llm_call(tmp_path, fake_mineru, fake_llm):
+    ex.extract(_pdf(tmp_path / "a.pdf", 2))
+    assert fake_llm.calls == []
 
 
-def test_auto_picks_marker_only_when_installed(monkeypatch):
-    monkeypatch.setattr(ex, "_marker_available", lambda: True)
-    assert ex._choose_text_method() == "marker"
-    monkeypatch.setattr(ex, "_marker_available", lambda: False)
-    assert ex._choose_text_method() == "pymupdf"
+# ---------- integration (실제 MinerU, 모델 로딩에 수 분) ----------
 
 
-def test_gemini_text_extractor_sends_text_pages_to_vision(tmp_path, fake_llm, monkeypatch):
-    monkeypatch.setenv("THEOREMLENS_TEXT_EXTRACTOR", "gemini")
-    get_settings.cache_clear()
-    fake_llm.default_text = "vision"
-    got = ex.extract(_make_pdf(tmp_path / "a.pdf", ["text"]))
-    assert [(p.method, p.markdown) for p in got] == [("gemini", "vision")]
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("```markdown\n**Theorem 1.** $x$\n```", "**Theorem 1.** $x$"),
-        ("```\nplain\n```", "plain"),
-        ("  no fence  ", "no fence"),
-        ("before ``` inside", "before ``` inside"),
-    ],
-)
-def test_transcription_strips_code_fences(tmp_path, fake_llm, raw, expected):
-    fake_llm.default_text = raw
-    pdf = _make_pdf(tmp_path / "a.pdf", ["scan"])
-    assert ex.transcribe_page_gemini(pdf, 1).markdown == expected
-
-
-def test_transcription_uses_one_based_page_in_prompt_and_png(tmp_path, fake_llm):
-    fake_llm.default_text = "t"
-    pdf = _make_pdf(tmp_path / "a.pdf", ["text", "scan"])
-    r = ex.transcribe_page_gemini(pdf, 2)
-    assert r.page_no == 2
-    assert "2쪽" in fake_llm.calls[0]["contents"][1]
-    assert ex.render_page_png(pdf, 2)[:4] == b"\x89PNG"
-
-
-def test_unconfigured_key_fails_fast_on_scans(tmp_path):
-    from theoremlens.llm import LLMNotConfigured
-
-    pdf = _make_pdf(tmp_path / "a.pdf", ["scan"])
-    with pytest.raises(LLMNotConfigured):
-        ex.extract(pdf)
+@pytest.mark.integration
+def test_real_mineru_extracts_one_page(tmp_path):
+    pdf = tmp_path / "one.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 100), "Theorem 1.1. Every compact set is bounded.", fontsize=14)
+    doc.save(pdf)
+    doc.close()
+    [page] = ex.extract_mineru(pdf, [1])
+    assert page.page_no == 1 and "compact" in page.markdown.lower()

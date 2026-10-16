@@ -11,11 +11,11 @@
 
 ## 설정
 
-`.env`(`.env.example` 참고)에서 읽는다: `GEMINI_API_KEY`, 모델 이름(`THEOREMLENS_ANSWER_MODEL`, `THEOREMLENS_FAST_MODEL`, `THEOREMLENS_EMBED_MODEL`은 로컬 HuggingFace 모델, 기본 `BAAI/bge-m3`), 임베딩 실행 설정(`THEOREMLENS_EMBED_DEVICE`, `THEOREMLENS_EMBED_BATCH`, `THEOREMLENS_EMBED_MAX_SEQ`, `THEOREMLENS_EMBED_QUERY_PREFIX`, `THEOREMLENS_EMBED_DOC_PREFIX`), `THEOREMLENS_TEXT_EXTRACTOR`(`auto|marker|pymupdf|gemini`), `THEOREMLENS_MAX_UPLOAD_MB`(업로드 상한, 기본 300). 런타임 데이터(SQLite DB, Chroma 인덱스, 책별 파일)는 gitignore된 `data/`에 둔다.
+`.env`(`.env.example` 참고)에서 읽는다: `GEMINI_API_KEY`, 모델 이름(`THEOREMLENS_ANSWER_MODEL`, `THEOREMLENS_FAST_MODEL`, `THEOREMLENS_EMBED_MODEL`은 로컬 HuggingFace 모델, 기본 `BAAI/bge-m3`), 임베딩 실행 설정(`THEOREMLENS_EMBED_DEVICE`, `THEOREMLENS_EMBED_BATCH`, `THEOREMLENS_EMBED_MAX_SEQ`, `THEOREMLENS_EMBED_QUERY_PREFIX`, `THEOREMLENS_EMBED_DOC_PREFIX`), `THEOREMLENS_MINERU_TIER`(`flash|basic|standard|advanced`, 기본 `advanced`), `THEOREMLENS_MINERU_OCR_MODE`(`auto|txt|ocr`), `THEOREMLENS_MAX_UPLOAD_MB`(업로드 상한, 기본 300). 런타임 데이터(SQLite DB, Chroma 인덱스, 책별 파일)는 gitignore된 `data/`에 둔다.
 
 임베딩 모델은 첫 실행 때 HuggingFace에서 내려받는다(bge-m3는 약 2.2GB). torch는 `pyproject.toml`에서 CUDA(cu128) 인덱스로 고정되어 있어 `uv sync`만으로 GPU 빌드가 설치된다(macOS 제외).
 
-선택 설치: `uv sync --extra dev --extra marker`는 text-PDF의 LaTeX 품질 추출용 Marker를 설치한다(torch 포함).
+PDF 추출용 MinerU(`mineru>=4.0,<5`)는 기본 의존성이라 `uv sync`로 같이 설치된다. 모델은 첫 추출 때 내려받는다.
 
 ## 코드 스타일 (ruff: `ruff check`, `ruff format`로 강제)
 
